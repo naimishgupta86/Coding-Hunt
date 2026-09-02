@@ -926,81 +926,150 @@ export const verifyHalfCode =
 // ANTI-CHEAT VIOLATION
 // ======================================================
 
-export const reportViolation =
-  async (req, res) => {
-    try {
-      const {
-        teamId,
-        violation,
-      } = req.body;
+// ======================================================
+// ANTI-CHEAT VIOLATION
+// ======================================================
 
-      if (
-        !teamId ||
-        !violation
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Team ID and violation are required.",
-        });
-      }
+export const reportViolation = async (
+  req,
+  res
+) => {
 
-      const team =
-        await Team.findOne({
-          teamId:
-            teamId.toUpperCase(),
-        });
+  try {
 
-      if (!team) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "Team not found.",
-        });
-      }
+    const {
+      teamId,
+      violation,
+    } = req.body;
 
-      if (
-        team.status ===
-        "Eliminated"
-      ) {
-        return res.json({
-          success: true,
-          status:
-            "Eliminated",
-          message:
-            "Team already eliminated.",
-        });
-      }
 
-      team.status =
-        "Eliminated";
+    // ==================================================
+    // VALIDATION
+    // ==================================================
 
-      team.gameStarted =
-        false;
+    if (
+      !teamId ||
+      !violation
+    ) {
 
-      await team.save();
+      return res.status(400).json({
 
-      await ActivityLog.create({
+        success: false,
+
+        message:
+          "Team ID and violation are required.",
+
+      });
+    }
+
+
+    // ==================================================
+    // FIND TEAM
+    // ==================================================
+
+    const team =
+      await Team.findOne({
+        teamId:
+          teamId
+            .toUpperCase(),
+      });
+
+
+    if (!team) {
+
+      return res.status(404).json({
+
+        success: false,
+
+        message:
+          "Team not found.",
+
+      });
+    }
+
+
+    // ==================================================
+    // ALREADY ELIMINATED
+    // ==================================================
+
+    if (
+      team.status ===
+      "Eliminated"
+    ) {
+
+      return res.json({
+
+        success: true,
+
+        eliminated: true,
+
+        status:
+          "Eliminated",
+
         teamId:
           team.teamId,
 
-        action:
-          "ANTI_CHEAT_VIOLATION",
+        message:
+          "Team already eliminated.",
 
-        details:
-          violation,
-
-        ipAddress:
-          req.ip || "",
       });
+    }
 
-      const io =
-        req.app.get("io");
 
-      if (io) {
-        io.to(
+    // ==================================================
+    // IMMEDIATE ELIMINATION
+    // ==================================================
+
+    team.status =
+      "Eliminated";
+
+    team.gameStarted =
+      false;
+
+
+    await team.save();
+
+
+    // ==================================================
+    // ACTIVITY LOG
+    // ==================================================
+
+    await ActivityLog.create({
+
+      teamId:
+        team.teamId,
+
+      action:
+        "ANTI_CHEAT_VIOLATION",
+
+      details:
+        `Team eliminated: ${violation}`,
+
+      ipAddress:
+        req.ip || "",
+
+    });
+
+
+    // ==================================================
+    // SOCKET.IO
+    // ==================================================
+
+    const io =
+      req.app.get("io");
+
+
+    if (io) {
+
+      // ----------------------------------------------
+      // TEAM
+      // ----------------------------------------------
+
+      io
+        .to(
           `team-${team.teamId}`
-        ).emit(
+        )
+        .emit(
           "team-eliminated",
           {
             teamId:
@@ -1008,43 +1077,80 @@ export const reportViolation =
 
             reason:
               `Anti-cheat violation: ${violation}`,
-          }
-        );
-
-        io.emit(
-          "team-updated",
-          {
-            teamId:
-              team.teamId,
 
             status:
               "Eliminated",
 
-            reason:
-              violation,
+            eliminated:
+              true,
           }
         );
-      }
 
-      return res.json({
-        success: true,
 
-        status:
-          "Eliminated",
+      // ----------------------------------------------
+      // ADMIN
+      // ----------------------------------------------
 
-        message:
-          "Team eliminated due to anti-cheat violation.",
-      });
-    } catch (error) {
-      console.error(
-        "VIOLATION ERROR:",
-        error
+      io.emit(
+        "team-updated",
+        {
+
+          teamId:
+            team.teamId,
+
+          status:
+            "Eliminated",
+
+          reason:
+            violation,
+
+          antiCheat:
+            true,
+
+        }
       );
 
-      return res.status(500).json({
-        success: false,
-        message:
-          error.message,
-      });
     }
-  };
+
+
+    // ==================================================
+    // RESPONSE
+    // ==================================================
+
+    return res.json({
+
+      success: true,
+
+      eliminated: true,
+
+      status:
+        "Eliminated",
+
+      teamId:
+        team.teamId,
+
+      message:
+        "🚨 Team eliminated due to anti-cheat violation.",
+
+    });
+
+
+  } catch (error) {
+
+    console.error(
+      "VIOLATION ERROR:",
+      error
+    );
+
+
+    return res.status(500).json({
+
+      success: false,
+
+      message:
+        error.message,
+
+    });
+
+  }
+};

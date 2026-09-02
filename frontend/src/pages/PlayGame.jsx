@@ -1,51 +1,91 @@
-import { useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+
+import { useNavigate } from "react-router-dom";
+
 import {
   Shield,
-  KeyRound,
-  Users,
-  Play,
-  LogOut,
-  Clock,
-  Heart,
   Trophy,
+  Heart,
+  Clock,
   CheckCircle,
   XCircle,
-  MapPin,
   Lock,
-  Unlock,
+  MapPin,
+  LogOut,
+  AlertTriangle,
+  Code2,
+  Users,
+  Zap,
 } from "lucide-react";
+
+import "./PlayGame.css";
+
+import { startAntiCheat } from "../utils/anticheat";
+
+// ======================================================
+// API
+// ======================================================
 
 const API_URL =
   import.meta.env.VITE_API_URL ||
   "http://localhost:5000/api";
 
+// ======================================================
+// TOTAL GAME TIME
+// 60 MINUTES = 3600 SECONDS
+// ======================================================
+
+const DEFAULT_TOTAL_GAME_TIME = 60 * 60;
+
+// ======================================================
+// COMPONENT
+// ======================================================
+
 function PlayGame() {
-  // =====================================================
+  const navigate = useNavigate();
+
+  // ====================================================
   // TEAM
-  // =====================================================
+  // ====================================================
 
   const [team, setTeam] = useState(null);
-
   const [teamId, setTeamId] = useState("");
   const [startCode, setStartCode] = useState("");
 
-  // =====================================================
-  // QUESTION
-  // =====================================================
+  // ====================================================
+  // GAME
+  // ====================================================
 
   const [question, setQuestion] = useState(null);
 
   const [selectedAnswer, setSelectedAnswer] =
     useState("");
 
-  // =====================================================
-  // GAME STATE
-  // =====================================================
+  const [correctAnswer, setCorrectAnswer] =
+    useState("");
 
   const [score, setScore] = useState(0);
   const [lives, setLives] = useState(3);
 
-  const [timeLeft, setTimeLeft] = useState(60);
+  // TOTAL GAME TIMER
+  const [timeLeft, setTimeLeft] = useState(
+    DEFAULT_TOTAL_GAME_TIME
+  );
+
+  const [totalGameTime, setTotalGameTime] =
+    useState(DEFAULT_TOTAL_GAME_TIME);
+
+  const [round, setRound] = useState(1);
+  const [totalRounds, setTotalRounds] = useState(10);
+
+  // ====================================================
+  // GAME STATE
+  // ====================================================
 
   const [gameStarted, setGameStarted] =
     useState(false);
@@ -57,23 +97,28 @@ function PlayGame() {
     useState(false);
 
   const [answerCorrect, setAnswerCorrect] =
-    useState(false);
+    useState(null);
 
-  // =====================================================
-  // CLUE STATE
-  // =====================================================
+  // ====================================================
+  // CLUE
+  // ====================================================
+
+  const [clue, setClue] = useState("");
+  const [locationHint, setLocationHint] =
+    useState("");
+
+  const [locationName, setLocationName] =
+    useState("");
 
   const [showClue, setShowClue] =
     useState(false);
 
-  const [clue, setClue] = useState("");
+  const [loadingClue, setLoadingClue] =
+    useState(false);
 
-  const [locationHint, setLocationHint] =
-    useState("");
-
-  // =====================================================
+  // ====================================================
   // HALF CODE
-  // =====================================================
+  // ====================================================
 
   const [halfCode, setHalfCode] =
     useState("");
@@ -84,136 +129,285 @@ function PlayGame() {
   const [verifyingCode, setVerifyingCode] =
     useState(false);
 
-  // =====================================================
-  // LOADING / ERROR
-  // =====================================================
+  // ====================================================
+  // UI
+  // ====================================================
 
   const [loading, setLoading] =
-    useState(false);
-
-  const [loadingClue, setLoadingClue] =
     useState(false);
 
   const [error, setError] =
     useState("");
 
-  // =====================================================
-  // LOAD SAVED TEAM
-  // =====================================================
+  const [message, setMessage] =
+    useState("");
 
-  useEffect(() => {
-    const savedTeam = localStorage.getItem(
-      "codingHuntCurrentTeam"
-    );
+  const [eliminated, setEliminated] =
+    useState(false);
 
-    if (!savedTeam) {
-      return;
-    }
+  // ====================================================
+  // REFS
+  // ====================================================
 
-    try {
-      const parsedTeam =
-        JSON.parse(savedTeam);
+  const timerRef = useRef(null);
 
-      if (!parsedTeam?.teamId) {
-        localStorage.removeItem(
-          "codingHuntCurrentTeam"
+  const antiCheatCleanupRef =
+    useRef(null);
+
+  const violationReported =
+    useRef(false);
+
+  // ====================================================
+  // LOAD CURRENT ROUND
+  // ====================================================
+
+  const loadCurrentRound = useCallback(
+    async (currentTeamId) => {
+      if (!currentTeamId) return;
+
+      try {
+        setLoading(true);
+        setError("");
+        setMessage("");
+
+        const response = await fetch(
+          `${API_URL}/game/round/${encodeURIComponent(
+            currentTeamId
+          )}`
         );
-        return;
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            data.message ||
+              "Unable to load question."
+          );
+        }
+
+        // -------------------------------
+        // ELIMINATED
+        // -------------------------------
+
+        if (
+          data.team?.status ===
+          "Eliminated"
+        ) {
+          setTeam(data.team);
+          setEliminated(true);
+          setGameStarted(false);
+          return;
+        }
+
+        // -------------------------------
+        // COMPLETED
+        // -------------------------------
+
+        if (
+          data.completed === true ||
+          data.finished === true ||
+          data.team?.status ===
+            "Completed"
+        ) {
+          setTeam(data.team);
+
+          setScore(
+            data.team?.score ?? 0
+          );
+
+          setLives(
+            data.team?.lives ?? 0
+          );
+
+          setGameFinished(true);
+          setGameStarted(false);
+
+          return;
+        }
+
+        // -------------------------------
+        // TEAM
+        // -------------------------------
+
+        if (data.team) {
+          setTeam(data.team);
+        }
+
+        // -------------------------------
+        // TOTAL GAME TIME
+        // -------------------------------
+
+        /*
+          Backend can send:
+          totalGameTime
+          gameTime
+          totalTime
+
+          Otherwise default = 60 minutes.
+        */
+
+        const backendTotalTime =
+          Number(
+            data.totalGameTime ??
+              data.gameTime ??
+              data.totalTime ??
+              DEFAULT_TOTAL_GAME_TIME
+          );
+
+        if (
+          Number.isFinite(
+            backendTotalTime
+          ) &&
+          backendTotalTime > 0
+        ) {
+          setTotalGameTime(
+            backendTotalTime
+          );
+        }
+
+        // -------------------------------
+        // REMAINING TIME
+        // -------------------------------
+
+        /*
+          If backend sends remainingTime,
+          use it.
+
+          Otherwise DO NOT reset the
+          existing timer.
+        */
+
+        if (
+          data.remainingTime !==
+            undefined &&
+          data.remainingTime !== null
+        ) {
+          const remaining =
+            Number(
+              data.remainingTime
+            );
+
+          if (
+            Number.isFinite(
+              remaining
+            )
+          ) {
+            setTimeLeft(
+              Math.max(
+                0,
+                remaining
+              )
+            );
+          }
+        }
+
+        // -------------------------------
+        // QUESTION
+        // -------------------------------
+
+        setQuestion(data.question);
+
+        // -------------------------------
+        // ROUND
+        // -------------------------------
+
+        setRound(
+          data.round ??
+            data.question?.round ??
+            data.team?.currentRound ??
+            1
+        );
+
+        setTotalRounds(
+          data.totalRounds ??
+            data.total ??
+            10
+        );
+
+        // -------------------------------
+        // SCORE
+        // -------------------------------
+
+        setScore(
+          data.team?.score ?? 0
+        );
+
+        // -------------------------------
+        // LIVES
+        // -------------------------------
+
+        setLives(
+          data.team?.lives ?? 3
+        );
+
+        // -------------------------------
+        // RESET ANSWER
+        // -------------------------------
+
+        setSelectedAnswer("");
+        setCorrectAnswer("");
+        setAnswered(false);
+        setAnswerCorrect(null);
+
+        // -------------------------------
+        // RESET CLUE
+        // -------------------------------
+
+        setClue("");
+        setLocationHint("");
+        setLocationName("");
+        setShowClue(false);
+
+        // -------------------------------
+        // RESET CODE
+        // -------------------------------
+
+        setHalfCode("");
+        setCodeVerified(false);
+
+        // IMPORTANT:
+        // NO TIMER RESET HERE
+
+        setGameStarted(true);
+        setGameFinished(false);
+      } catch (err) {
+        console.error(
+          "LOAD ROUND ERROR:",
+          err
+        );
+
+        setError(
+          err.message ||
+            "Unable to load question."
+        );
+      } finally {
+        setLoading(false);
       }
+    },
+    []
+  );
 
-      setTeam(parsedTeam);
+  // ====================================================
+  // START GAME
+  // ====================================================
 
-      setTeamId(
-        parsedTeam.teamId || ""
-      );
+  const startGame = async (event) => {
+    event.preventDefault();
 
-      setStartCode(
-        parsedTeam.startCode || ""
-      );
-
-      setScore(
-        Number(parsedTeam.score || 0)
-      );
-
-      setLives(
-        Number(parsedTeam.lives ?? 3)
-      );
-
-      // Automatically load current round
-      loadCurrentRound(
-        parsedTeam.teamId
-      );
-    } catch (error) {
-      console.error(
-        "TEAM STORAGE ERROR:",
-        error
-      );
-
-      localStorage.removeItem(
-        "codingHuntCurrentTeam"
-      );
-    }
-  }, []);
-
-  // =====================================================
-  // TIMER
-  // =====================================================
-
-  useEffect(() => {
     if (
-      !gameStarted ||
-      answered ||
-      showClue ||
-      gameFinished
+      !teamId.trim() ||
+      !startCode.trim()
     ) {
-      return;
-    }
-
-    if (timeLeft <= 0) {
-      handleAnswer(null);
-      return;
-    }
-
-    const timer = setInterval(() => {
-      setTimeLeft(
-        (previous) => previous - 1
-      );
-    }, 1000);
-
-    return () => {
-      clearInterval(timer);
-    };
-  }, [
-    gameStarted,
-    answered,
-    showClue,
-    gameFinished,
-    timeLeft,
-  ]);
-
-  // =====================================================
-  // TEAM LOGIN
-  // =====================================================
-
-  const startGame = async () => {
-    setError("");
-
-    if (!teamId.trim()) {
       setError(
-        "Please enter Team ID."
-      );
-      return;
-    }
-
-    if (!startCode.trim()) {
-      setError(
-        "Please enter Start Code."
+        "Team ID and Start Code are required."
       );
       return;
     }
 
     try {
       setLoading(true);
+      setError("");
+      setMessage("");
 
       const response = await fetch(
         `${API_URL}/teams/verify`,
@@ -226,228 +420,413 @@ function PlayGame() {
           },
 
           body: JSON.stringify({
-            teamId:
-              teamId
-                .trim()
-                .toUpperCase(),
+            teamId: teamId
+              .trim()
+              .toUpperCase(),
 
-            startCode:
-              startCode
-                .trim()
-                .toUpperCase(),
+            startCode: startCode
+              .trim()
+              .toUpperCase(),
           }),
         }
       );
 
-      const data =
-        await response.json();
-
-      console.log(
-        "TEAM VERIFY RESPONSE:",
-        data
-      );
+      const data = await response.json();
 
       if (!response.ok) {
-        setError(
+        throw new Error(
           data.message ||
             "Invalid Team ID or Start Code."
         );
-        return;
       }
+
+      const verifiedTeam =
+        data.team || data;
+
+      // -------------------------------
+      // ELIMINATED
+      // -------------------------------
 
       if (
-        !data.success ||
-        !data.team
+        verifiedTeam.status ===
+        "Eliminated"
       ) {
-        setError(
-          "Invalid response from server."
-        );
+        setTeam(verifiedTeam);
+        setEliminated(true);
         return;
       }
 
-      const foundTeam =
-        data.team;
+      // -------------------------------
+      // SAVE TEAM
+      // -------------------------------
 
-      if (
-        foundTeam.status !==
-        "Active"
-      ) {
-        setError(
-          "This team is not active."
-        );
-        return;
-      }
-
-      setTeam(foundTeam);
-
-      setTeamId(
-        foundTeam.teamId
-      );
-
-      setStartCode(
-        foundTeam.startCode || ""
-      );
-
-      setScore(
-        Number(foundTeam.score || 0)
-      );
-
-      setLives(
-        Number(foundTeam.lives ?? 3)
-      );
+      setTeam(verifiedTeam);
 
       localStorage.setItem(
         "codingHuntCurrentTeam",
         JSON.stringify(
-          foundTeam
+          verifiedTeam
         )
       );
 
+      violationReported.current =
+        false;
+
+      // -------------------------------
+      // INITIAL TIMER
+      // -------------------------------
+
+      /*
+        Only initialize timer when
+        starting a NEW hunt.
+      */
+
+      const serverTime =
+        Number(
+          data.totalGameTime ??
+            data.gameTime ??
+            data.totalTime ??
+            DEFAULT_TOTAL_GAME_TIME
+        );
+
+      if (
+        Number.isFinite(serverTime) &&
+        serverTime > 0
+      ) {
+        setTotalGameTime(serverTime);
+        setTimeLeft(serverTime);
+      } else {
+        setTotalGameTime(
+          DEFAULT_TOTAL_GAME_TIME
+        );
+
+        setTimeLeft(
+          DEFAULT_TOTAL_GAME_TIME
+        );
+      }
+
+      // -------------------------------
+      // LOAD GAME
+      // -------------------------------
+
       await loadCurrentRound(
-        foundTeam.teamId
+        verifiedTeam.teamId
       );
-    } catch (error) {
+    } catch (err) {
       console.error(
-        "TEAM LOGIN ERROR:",
-        error
+        "START GAME ERROR:",
+        err
       );
 
       setError(
-        "Unable to connect to backend server."
+        err.message ||
+          "Unable to start game."
       );
     } finally {
       setLoading(false);
     }
   };
 
-  // =====================================================
-  // LOAD CURRENT ROUND
-  // =====================================================
+  // ====================================================
+  // ANTI CHEAT
+  // ====================================================
 
-  const loadCurrentRound = async (
-    currentTeamId
-  ) => {
-    try {
+  const reportViolation = useCallback(
+    async (violationType) => {
+      if (
+        violationReported.current
+      ) {
+        return;
+      }
+
+      const currentTeam =
+        team ||
+        (() => {
+          try {
+            const saved =
+              localStorage.getItem(
+                "codingHuntCurrentTeam"
+              );
+
+            return saved
+              ? JSON.parse(saved)
+              : null;
+          } catch {
+            return null;
+          }
+        })();
+
+      if (!currentTeam?.teamId) {
+        return;
+      }
+
+      violationReported.current =
+        true;
+
+      // -------------------------------
+      // STOP GAME
+      // -------------------------------
+
+      setGameStarted(false);
+      setGameFinished(false);
+      setQuestion(null);
+      setAnswered(false);
+      setSelectedAnswer("");
+      setClue("");
+      setShowClue(false);
+      setEliminated(true);
       setError("");
 
-      const response =
-        await fetch(
-          `${API_URL}/game/round/${currentTeamId}`
+      // -------------------------------
+      // STOP TIMER
+      // -------------------------------
+
+      if (timerRef.current) {
+        clearInterval(
+          timerRef.current
         );
 
-      const data =
-        await response.json();
-
-      console.log(
-        "CURRENT ROUND RESPONSE:",
-        data
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          data.message ||
-            "Unable to load question."
-        );
+        timerRef.current = null;
       }
+
+      // -------------------------------
+      // STOP ANTI CHEAT
+      // -------------------------------
 
       if (
-        !data.success ||
-        !data.question
+        antiCheatCleanupRef.current
       ) {
-        throw new Error(
-          "Question not available."
-        );
+        antiCheatCleanupRef.current();
+
+        antiCheatCleanupRef.current =
+          null;
       }
 
-      // Update team
-      if (data.team) {
-        setTeam(data.team);
+      // -------------------------------
+      // LOCAL ELIMINATION
+      // -------------------------------
 
-        setScore(
-          Number(data.team.score || 0)
-        );
+      const eliminatedTeam = {
+        ...currentTeam,
+        status: "Eliminated",
+        gameStarted: false,
+      };
 
-        setLives(
-          Number(
-            data.team.lives ?? 3
-          )
-        );
+      setTeam(eliminatedTeam);
 
-        localStorage.setItem(
-          "codingHuntCurrentTeam",
-          JSON.stringify(
-            data.team
-          )
-        );
-      }
-
-      // Set question
-      setQuestion(
-        data.question
-      );
-
-      setSelectedAnswer("");
-
-      setAnswered(false);
-
-      setAnswerCorrect(false);
-
-      setShowClue(false);
-
-      setClue("");
-
-      setLocationHint("");
-
-      setHalfCode("");
-
-      setCodeVerified(false);
-
-      setTimeLeft(
-        Number(
-          data.question.time || 60
+      localStorage.setItem(
+        "codingHuntCurrentTeam",
+        JSON.stringify(
+          eliminatedTeam
         )
       );
 
-      setGameStarted(true);
+      // -------------------------------
+      // BACKEND
+      // -------------------------------
 
-      setGameFinished(false);
-    } catch (error) {
-      console.error(
-        "LOAD CURRENT ROUND ERROR:",
-        error
-      );
+      try {
+        const response =
+          await fetch(
+            `${API_URL}/game/violation`,
+            {
+              method: "POST",
 
-      setError(
-        error.message ||
-          "Unable to load questions."
-      );
+              headers: {
+                "Content-Type":
+                  "application/json",
+              },
 
-      setGameStarted(false);
-    }
-  };
+              body: JSON.stringify({
+                teamId:
+                  currentTeam.teamId,
 
-  // =====================================================
-  // SUBMIT ANSWER
-  // =====================================================
+                violation:
+                  violationType,
+              }),
+            }
+          );
 
-  const handleAnswer = async (
-    answer
-  ) => {
+        const data =
+          await response.json();
+
+        console.log(
+          "ANTI-CHEAT RESPONSE:",
+          data
+        );
+
+        if (
+          data.status ===
+            "Eliminated" ||
+          data.eliminated === true
+        ) {
+          setTeam(
+            (previous) => ({
+              ...(previous ||
+                currentTeam),
+
+              status:
+                "Eliminated",
+
+              gameStarted:
+                false,
+            })
+          );
+        }
+      } catch (err) {
+        console.error(
+          "VIOLATION REPORT ERROR:",
+          err
+        );
+
+        setTeam(
+          (previous) => ({
+            ...(previous ||
+              currentTeam),
+
+            status:
+              "Eliminated",
+
+            gameStarted:
+              false,
+          })
+        );
+      }
+    },
+    [team]
+  );
+
+  // ====================================================
+  // ANTI CHEAT EFFECT
+  // ====================================================
+
+  useEffect(() => {
     if (
-      answered ||
-      !question ||
-      !team
+      !team?.teamId ||
+      !gameStarted ||
+      eliminated ||
+      gameFinished
     ) {
       return;
     }
 
-    try {
-      setLoading(true);
+    if (
+      antiCheatCleanupRef.current
+    ) {
+      antiCheatCleanupRef.current();
 
-      setSelectedAnswer(
-        answer || "TIMEOUT"
+      antiCheatCleanupRef.current =
+        null;
+    }
+
+    antiCheatCleanupRef.current =
+      startAntiCheat(
+        reportViolation
       );
 
+    return () => {
+      if (
+        antiCheatCleanupRef.current
+      ) {
+        antiCheatCleanupRef.current();
+
+        antiCheatCleanupRef.current =
+          null;
+      }
+    };
+  }, [
+    team?.teamId,
+    gameStarted,
+    eliminated,
+    gameFinished,
+    reportViolation,
+  ]);
+
+  // ====================================================
+  // TOTAL GAME TIMER
+  // ====================================================
+
+  useEffect(() => {
+    if (
+      !gameStarted ||
+      eliminated ||
+      gameFinished
+    ) {
+      return;
+    }
+
+    if (timerRef.current) {
+      clearInterval(
+        timerRef.current
+      );
+    }
+
+    timerRef.current =
+      setInterval(() => {
+        setTimeLeft((previous) => {
+          if (previous <= 1) {
+            clearInterval(
+              timerRef.current
+            );
+
+            timerRef.current = null;
+
+            setTimeLeft(0);
+
+            setGameStarted(false);
+            setGameFinished(true);
+            setQuestion(null);
+            setShowClue(false);
+            setAnswered(false);
+
+            setMessage(
+              "TIME OVER! The Coding Hunt has ended."
+            );
+
+            return 0;
+          }
+
+          return previous - 1;
+        });
+      }, 1000);
+
+    return () => {
+      if (timerRef.current) {
+        clearInterval(
+          timerRef.current
+        );
+
+        timerRef.current = null;
+      }
+    };
+  }, [
+    gameStarted,
+    eliminated,
+    gameFinished,
+  ]);
+
+  // ====================================================
+  // SUBMIT ANSWER
+  // ====================================================
+
+  const handleAnswer = async (
+    optionKey
+  ) => {
+    if (
+      answered ||
+      !question ||
+      eliminated ||
+      !team?.teamId ||
+      timeLeft <= 0
+    ) {
+      return;
+    }
+
+    setSelectedAnswer(optionKey);
+    setError("");
+    setMessage("");
+
+    try {
       const response =
         await fetch(
           `${API_URL}/game/answer`,
@@ -467,7 +846,7 @@ function PlayGame() {
                 question.questionId,
 
               answer:
-                answer || "",
+                optionKey,
             }),
           }
         );
@@ -475,126 +854,150 @@ function PlayGame() {
       const data =
         await response.json();
 
-      console.log(
-        "ANSWER RESPONSE:",
-        data
-      );
-
       if (!response.ok) {
-        setError(
+        throw new Error(
           data.message ||
             "Unable to submit answer."
         );
-
-        return;
       }
 
-      // Update score/lives
-      setScore(
-        Number(data.score || 0)
+      // -------------------------------
+      // CORRECT ANSWER
+      // -------------------------------
+
+      setCorrectAnswer(
+        data.correctAnswer || ""
       );
-
-      setLives(
-        Number(data.lives ?? 3)
-      );
-
-      // Update team
-      const updatedTeam = {
-        ...team,
-
-        score:
-          Number(data.score || 0),
-
-        lives:
-          Number(data.lives ?? 3),
-
-        status:
-          data.status ||
-          team.status,
-      };
-
-      setTeam(updatedTeam);
-
-      localStorage.setItem(
-        "codingHuntCurrentTeam",
-        JSON.stringify(
-          updatedTeam
-        )
-      );
-
-      // Team eliminated
-      if (
-        data.status ===
-        "Eliminated"
-      ) {
-        setAnswered(true);
-        setAnswerCorrect(false);
-        setGameStarted(false);
-        return;
-      }
 
       setAnswerCorrect(
-        Boolean(data.correct)
+        data.correct === true
       );
 
       setAnswered(true);
 
-      // =================================================
-      // IMPORTANT:
-      // CORRECT ANSWER KE BAAD DIRECT ROUND CHANGE NAHI
-      // HOGA.
-      //
-      // NEXT CLICK PAR CLUE LOAD HOGA.
-      // =================================================
-    } catch (error) {
+      // -------------------------------
+      // SCORE
+      // -------------------------------
+
+      setScore(
+        data.score ??
+          team.score ??
+          0
+      );
+
+      // -------------------------------
+      // LIVES
+      // -------------------------------
+
+      setLives(
+        data.lives ??
+          team.lives ??
+          3
+      );
+
+      // -------------------------------
+      // UPDATE TEAM
+      // -------------------------------
+
+      setTeam(
+        (previous) => ({
+          ...previous,
+
+          score:
+            data.score ??
+            previous?.score ??
+            0,
+
+          lives:
+            data.lives ??
+            previous?.lives ??
+            3,
+
+          status:
+            data.status ??
+            previous?.status,
+        })
+      );
+
+      // -------------------------------
+      // ELIMINATED
+      // -------------------------------
+
+      if (
+        data.status ===
+        "Eliminated"
+      ) {
+        setEliminated(true);
+        setGameStarted(false);
+        setQuestion(null);
+        return;
+      }
+
+      // -------------------------------
+      // COMPLETED
+      // -------------------------------
+
+      if (
+        data.completed === true ||
+        data.status === "Completed"
+      ) {
+        setGameFinished(true);
+        setGameStarted(false);
+      }
+    } catch (err) {
       console.error(
         "ANSWER ERROR:",
-        error
+        err
       );
 
       setError(
-        "Unable to submit answer."
+        err.message ||
+          "Unable to submit answer."
       );
-    } finally {
-      setLoading(false);
+
+      setSelectedAnswer("");
     }
   };
 
-  // =====================================================
-  // NEXT BUTTON
-  // =====================================================
+  // ====================================================
+  // RETRY
+  // ====================================================
 
-  const handleNext = async () => {
+  const handleRetry = () => {
     if (
-      !answered ||
-      !question ||
-      !team
+      lives <= 0 ||
+      eliminated ||
+      timeLeft <= 0
     ) {
       return;
     }
 
-    // Wrong answer
-    // Team can try next only if still alive
-    if (!answerCorrect) {
-      setError(
-        "Answer is incorrect. Solve the question correctly to unlock the clue."
-      );
+    setSelectedAnswer("");
+    setCorrectAnswer("");
+    setAnswerCorrect(null);
+    setAnswered(false);
+    setError("");
+    setMessage("");
+
+    // IMPORTANT:
+    // TIMER IS NOT RESET
+  };
+
+  // ====================================================
+  // LOAD CLUE
+  // ====================================================
+
+  const loadClue = async () => {
+    if (
+      !team?.teamId ||
+      !question?.questionId ||
+      timeLeft <= 0
+    ) {
       return;
     }
 
-    // Correct answer
-    // Now load clue
-    await loadClue();
-  };
-
-  // =====================================================
-  // LOAD CLUE
-  // =====================================================
-
-  const loadClue = async () => {
     try {
       setLoadingClue(true);
-
       setError("");
 
       const response =
@@ -608,11 +1011,6 @@ function PlayGame() {
 
       const data =
         await response.json();
-
-      console.log(
-        "CLUE RESPONSE:",
-        data
-      );
 
       if (!response.ok) {
         throw new Error(
@@ -629,17 +1027,19 @@ function PlayGame() {
         data.locationHint || ""
       );
 
-      setShowClue(true);
+      setLocationName(
+        data.locationName || ""
+      );
 
-      setGameStarted(false);
-    } catch (error) {
+      setShowClue(true);
+    } catch (err) {
       console.error(
-        "LOAD CLUE ERROR:",
-        error
+        "CLUE ERROR:",
+        err
       );
 
       setError(
-        error.message ||
+        err.message ||
           "Unable to load clue."
       );
     } finally {
@@ -647,26 +1047,51 @@ function PlayGame() {
     }
   };
 
-  // =====================================================
-  // VERIFY HALF CODE
-  // =====================================================
+  // ====================================================
+  // NEXT
+  // ====================================================
 
-  const verifyCode = async () => {
-    if (!halfCode.trim()) {
-      setError(
-        "Please enter the half code."
-      );
+  const handleNext = async () => {
+    if (
+      !answerCorrect ||
+      eliminated ||
+      timeLeft <= 0
+    ) {
       return;
     }
 
-    if (!team || !question) {
+    await loadClue();
+  };
+
+  // ====================================================
+  // VERIFY HALF CODE
+  // ====================================================
+
+  const verifyCode = async () => {
+    if (
+      !halfCode.trim() ||
+      !team?.teamId ||
+      !question?.questionId
+    ) {
+      setError(
+        "Please enter the half code."
+      );
+
+      return;
+    }
+
+    if (timeLeft <= 0) {
+      setError(
+        "Time is over."
+      );
+
       return;
     }
 
     try {
       setVerifyingCode(true);
-
       setError("");
+      setMessage("");
 
       const response =
         await fetch(
@@ -697,201 +1122,251 @@ function PlayGame() {
       const data =
         await response.json();
 
-      console.log(
-        "HALF CODE RESPONSE:",
-        data
-      );
-
       if (!response.ok) {
-        setError(
+        throw new Error(
           data.message ||
-            "Wrong half code."
+            "Invalid half code."
         );
-
-        setCodeVerified(false);
-
-        return;
       }
+
+      // -------------------------------
+      // COMPLETED
+      // -------------------------------
 
       if (
-        !data.success ||
-        !data.correct
+        data.completed === true ||
+        data.status === "Completed"
       ) {
-        setError(
-          data.message ||
-            "Wrong half code."
-        );
-
+        setGameFinished(true);
+        setGameStarted(false);
         return;
       }
 
-      // =================================================
-      // HALF CODE CORRECT
-      // =================================================
+      // -------------------------------
+      // VERIFIED
+      // -------------------------------
 
       setCodeVerified(true);
 
-      // LAST ROUND
-      if (data.completed) {
-        setScore(
-          Number(data.score || score)
-        );
+      setMessage(
+        "Code verified! Loading next round..."
+      );
 
-        setLives(
-          Number(data.lives ?? lives)
-        );
+      setHalfCode("");
 
-        const completedTeam = {
-          ...team,
+      const nextTeam =
+        data.team || team;
 
-          status:
-            "Completed",
-
-          round: 10,
-
-          score:
-            Number(
-              data.score || score
-            ),
-
-          lives:
-            Number(
-              data.lives ?? lives
-            ),
-        };
-
-        setTeam(
-          completedTeam
-        );
+      if (data.team) {
+        setTeam(data.team);
 
         localStorage.setItem(
           "codingHuntCurrentTeam",
           JSON.stringify(
-            completedTeam
+            data.team
           )
         );
-
-        setShowClue(false);
-
-        setGameFinished(true);
-
-        setGameStarted(false);
-
-        return;
       }
 
-      // =================================================
-      // NEXT ROUND UNLOCKED
-      // =================================================
+      // IMPORTANT:
+      // loadCurrentRound DOES NOT
+      // RESET TOTAL TIMER
 
-      const nextRound =
-        Number(
-          data.round
-        );
-
-      const updatedTeam = {
-        ...team,
-
-        round:
-          nextRound,
-
-        score:
-          Number(
-            data.score || score
-          ),
-
-        lives:
-          Number(
-            data.lives ?? lives
-          ),
-      };
-
-      setTeam(
-        updatedTeam
-      );
-
-      setScore(
-        Number(
-          data.score || score
-        )
-      );
-
-      setLives(
-        Number(
-          data.lives ?? lives
-        )
-      );
-
-      localStorage.setItem(
-        "codingHuntCurrentTeam",
-        JSON.stringify(
-          updatedTeam
-        )
-      );
-
-      // Load next round
       await loadCurrentRound(
-        updatedTeam.teamId
+        nextTeam.teamId
       );
-    } catch (error) {
+    } catch (err) {
       console.error(
-        "VERIFY HALF CODE ERROR:",
-        error
+        "HALF CODE ERROR:",
+        err
       );
 
       setError(
-        "Unable to verify half code."
+        err.message ||
+          "Invalid half code."
       );
     } finally {
       setVerifyingCode(false);
     }
   };
 
-  // =====================================================
+  // ====================================================
   // LOGOUT
-  // =====================================================
+  // ====================================================
 
   const logout = () => {
+    if (
+      antiCheatCleanupRef.current
+    ) {
+      antiCheatCleanupRef.current();
+
+      antiCheatCleanupRef.current =
+        null;
+    }
+
+    if (timerRef.current) {
+      clearInterval(
+        timerRef.current
+      );
+
+      timerRef.current = null;
+    }
+
     localStorage.removeItem(
       "codingHuntCurrentTeam"
     );
 
     setTeam(null);
-
     setTeamId("");
-
     setStartCode("");
-
     setQuestion(null);
-
     setGameStarted(false);
-
     setGameFinished(false);
-
-    setAnswered(false);
-
-    setSelectedAnswer("");
-
-    setShowClue(false);
-
-    setClue("");
-
-    setLocationHint("");
-
-    setHalfCode("");
-
-    setCodeVerified(false);
-
-    setScore(0);
-
-    setLives(3);
-
+    setEliminated(false);
     setError("");
+    setMessage("");
+
+    violationReported.current =
+      false;
+
+    navigate("/");
   };
 
-  // =====================================================
+  // ====================================================
+  // FORMAT TIMER
+  // ====================================================
+
+  const formatTime = (seconds) => {
+    const safeSeconds = Math.max(
+      0,
+      Number(seconds) || 0
+    );
+
+    const hours = Math.floor(
+      safeSeconds / 3600
+    );
+
+    const minutes = Math.floor(
+      (safeSeconds % 3600) / 60
+    );
+
+    const secs =
+      safeSeconds % 60;
+
+    return `${String(hours).padStart(
+      2,
+      "0"
+    )}:${String(minutes).padStart(
+      2,
+      "0"
+    )}:${String(secs).padStart(
+      2,
+      "0"
+    )}`;
+  };
+
+  // ====================================================
+  // ELIMINATED SCREEN
+  // ====================================================
+
+  if (
+    eliminated ||
+    team?.status ===
+      "Eliminated"
+  ) {
+    return (
+      <div className="student-game-page">
+
+        <nav className="student-game-navbar">
+
+          <div className="student-game-brand">
+
+            <div className="student-brand-icon">
+              <Shield size={24} />
+            </div>
+
+            <span>
+              CODING
+              <strong>HUNT</strong>
+            </span>
+
+          </div>
+
+        </nav>
+
+        <main className="game-finished-wrapper">
+
+          <div className="game-finished-card elimination-card">
+
+            <div className="elimination-icon">
+              <XCircle size={58} />
+            </div>
+
+            <div className="finished-badge danger-badge">
+              ELIMINATED
+            </div>
+
+            <h1 className="finished-title elimination-title">
+              TEAM ELIMINATED
+            </h1>
+
+            <p className="finished-subtitle">
+              Your hunt session has
+              been terminated.
+            </p>
+
+            <div className="elimination-warning">
+
+              <AlertTriangle size={18} />
+
+              <span>
+                ANTI-CHEAT VIOLATION
+              </span>
+
+            </div>
+
+            <div className="finished-team">
+              TEAM:
+
+              <span>
+                {team?.teamId ||
+                  teamId ||
+                  "UNKNOWN"}
+              </span>
+            </div>
+
+            <p className="elimination-text">
+              Tab switching, leaving
+              the game window or
+              violating anti-cheat
+              rules results in
+              immediate elimination.
+            </p>
+
+            <button
+              className="finished-home-btn"
+              onClick={() => {
+                localStorage.removeItem(
+                  "codingHuntCurrentTeam"
+                );
+
+                navigate("/");
+              }}
+            >
+              BACK TO HOME
+            </button>
+
+          </div>
+
+        </main>
+
+      </div>
+    );
+  }
+
+  // ====================================================
   // LOGIN SCREEN
-  // =====================================================
+  // ====================================================
 
   if (
     !team &&
@@ -900,783 +1375,864 @@ function PlayGame() {
   ) {
     return (
       <div className="student-game-page">
-        <div className="student-login-card">
 
-          <div className="student-logo">
-            <Shield size={32} />
-          </div>
+        <nav className="student-game-navbar">
 
-          <p className="admin-label">
-            CODING HUNT
-          </p>
+          <div className="student-game-brand">
 
-          <h1>
-            Enter The Hunt
-          </h1>
-
-          <p className="student-login-subtitle">
-            Enter your Team ID and Start
-            Code provided by the admin.
-          </p>
-
-          <label>
-            Team ID
-          </label>
-
-          <div className="student-input">
-            <Users size={17} />
-
-            <input
-              type="text"
-              placeholder="e.g. CH-123456"
-              value={teamId}
-              onChange={(e) =>
-                setTeamId(
-                  e.target.value
-                )
-              }
-              autoComplete="off"
-            />
-          </div>
-
-          <label>
-            Start Code
-          </label>
-
-          <div className="student-input">
-            <KeyRound size={17} />
-
-            <input
-              type="text"
-              placeholder="Enter start code"
-              value={startCode}
-              onChange={(e) =>
-                setStartCode(
-                  e.target.value
-                )
-              }
-              autoComplete="off"
-            />
-          </div>
-
-          {error && (
-            <div className="game-error">
-              {error}
+            <div className="student-brand-icon">
+              <Shield size={24} />
             </div>
-          )}
 
-          <button
-            className="start-game-btn"
-            onClick={startGame}
-            disabled={loading}
-          >
-            <Play size={17} />
-
-            {loading
-              ? "CONNECTING..."
-              : "START HUNT"}
-          </button>
-
-          <p className="student-note">
-            Your questions are loaded
-            according to your assigned
-            question set.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  // =====================================================
-  // GAME FINISHED
-  // =====================================================
-
-  if (gameFinished) {
-    return (
-      <div className="student-game-page">
-
-        <div className="game-finished-card">
-
-          <div className="finish-icon">
-            <Trophy size={45} />
-          </div>
-
-          <p className="admin-label">
-            CODING HUNT
-          </p>
-
-          <h1>
-            Hunt Completed!
-          </h1>
-
-          <p>
-            Congratulations,{" "}
-            <strong>
-              {team?.teamName}
-            </strong>
-          </p>
-
-          <div className="final-score">
             <span>
-              FINAL SCORE
+              CODING
+              <strong>HUNT</strong>
             </span>
 
-            <strong>
-              {score}
-            </strong>
           </div>
 
-          <div className="final-stats">
+        </nav>
 
-            <div>
-              <Heart size={18} />
+        <main className="student-login-wrapper">
 
-              <strong>
-                {lives}
-              </strong>
+          <div className="student-login-card">
 
-              <small>
-                Lives
-              </small>
+            <div className="login-logo">
+              <Shield size={38} />
             </div>
 
-            <div>
-              <Trophy size={18} />
+            <div className="login-badge">
+              PLAYER ARENA
+            </div>
 
-              <strong>
-                10/10
-              </strong>
+            <h1>
+              PLAYER LOGIN
+            </h1>
 
-              <small>
-                Rounds
-              </small>
+            <p className="login-subtitle">
+              Enter your team credentials
+              to enter the hunt.
+            </p>
+
+            <form
+              onSubmit={startGame}
+              className="login-form"
+            >
+
+              <div className="login-field">
+
+                <label>
+                  <Users size={15} />
+                  TEAM ID
+                </label>
+
+                <input
+                  className="student-input"
+                  type="text"
+                  placeholder="e.g. TEAM001"
+                  value={teamId}
+                  onChange={(event) =>
+                    setTeamId(
+                      event.target.value
+                    )
+                  }
+                  autoComplete="off"
+                />
+
+              </div>
+
+              <div className="login-field">
+
+                <label>
+                  <Lock size={15} />
+                  START CODE
+                </label>
+
+                <input
+                  className="student-input"
+                  type="text"
+                  placeholder="Enter start code"
+                  value={startCode}
+                  onChange={(event) =>
+                    setStartCode(
+                      event.target.value
+                    )
+                  }
+                  autoComplete="off"
+                />
+
+              </div>
+
+              {error && (
+                <div className="game-error login-error">
+
+                  <AlertTriangle size={16} />
+
+                  {error}
+
+                </div>
+              )}
+
+              <button
+                className="start-game-btn"
+                type="submit"
+                disabled={loading}
+              >
+
+                {loading ? (
+                  <>
+                    <span className="button-loader" />
+                    VERIFYING...
+                  </>
+                ) : (
+                  <>
+                    <Zap size={18} />
+                    START HUNT
+                  </>
+                )}
+
+              </button>
+
+            </form>
+
+            <div className="login-info-grid">
+
+              <div>
+                <Heart size={17} />
+                <strong>3</strong>
+                <span>LIVES</span>
+              </div>
+
+              <div>
+                <Trophy size={17} />
+                <strong>
+                  {totalRounds}
+                </strong>
+                <span>ROUNDS</span>
+              </div>
+
+              <div>
+                <Clock size={17} />
+                <strong>
+                  60
+                </strong>
+                <span>MINUTES</span>
+              </div>
+
+              <div>
+                <Shield size={17} />
+                <strong>ON</strong>
+                <span>ANTI-CHEAT</span>
+              </div>
+
+            </div>
+
+            <div className="login-warning">
+
+              <AlertTriangle size={14} />
+
+              Do not switch tabs during
+              the hunt.
+
             </div>
 
           </div>
 
-          <button
-            className="logout-game-btn"
-            onClick={logout}
-          >
-            <LogOut size={16} />
-            EXIT
-          </button>
+        </main>
 
-        </div>
       </div>
     );
   }
 
-  // =====================================================
-  // CLUE SCREEN
-  // =====================================================
+  // ====================================================
+  // FINISHED
+  // ====================================================
 
-  if (showClue) {
+  if (gameFinished) {
     return (
       <div className="student-game-page">
 
         <nav className="student-game-navbar">
 
           <div className="student-game-brand">
-            <Shield size={22} />
 
-            <div>
-              <strong>
-                CODING HUNT
-              </strong>
-
-              <small>
-                STUDENT ARENA
-              </small>
+            <div className="student-brand-icon">
+              <Shield size={24} />
             </div>
-          </div>
-
-          <div className="student-team-info">
 
             <span>
-              {team?.teamName}
-            </span>
-
-            <b>
-              {team?.teamId}
-            </b>
-
-            <span>
-              SET {team?.set || "A"}
+              CODING
+              <strong>HUNT</strong>
             </span>
 
           </div>
-
-          <button
-            onClick={logout}
-            title="Exit game"
-          >
-            <LogOut size={17} />
-          </button>
 
         </nav>
 
-        <main className="game-question-area">
+        <main className="game-finished-wrapper">
 
-          <div className="game-question-card">
+          <div className="game-finished-card">
 
-            <div className="question-top-line">
+            <div className="finished-success-icon">
+              <Trophy size={60} />
+            </div>
+
+            <div className="finished-badge">
+              {timeLeft <= 0
+                ? "TIME OVER"
+                : "HUNT COMPLETED"}
+            </div>
+
+            <h1 className="finished-title">
+
+              {timeLeft <= 0
+                ? "TIME'S UP!"
+                : "CONGRATULATIONS!"}
+
+            </h1>
+
+            <p className="finished-subtitle">
+
+              {timeLeft <= 0
+                ? "The total hunt time has ended."
+                : "You successfully completed the Coding Hunt."}
+
+            </p>
+
+            <div className="finished-score">
 
               <span>
-                ROUND {team?.round}
+                FINAL SCORE
               </span>
 
-              <span>
-                CLUE UNLOCKED
-              </span>
+              <strong>
+                {score}
+              </strong>
 
-              <span>
-                <Unlock size={15} />
-              </span>
+              <small>
+                POINTS
+              </small>
 
             </div>
-
-            <div
-              style={{
-                textAlign: "center",
-                marginBottom: "25px",
-              }}
-            >
-              <Unlock
-                size={50}
-              />
-
-              <h1>
-                🔎 Your Next Clue
-              </h1>
-
-              <p>
-                You solved the question
-                correctly!
-              </p>
-            </div>
-
-            {/* CLUE */}
-
-            <div
-              className="answer-result answer-result-correct"
-              style={{
-                marginBottom: "18px",
-              }}
-            >
-              <CheckCircle
-                size={22}
-              />
-
-              <div>
-                <strong>
-                  CLUE
-                </strong>
-
-                <p>
-                  {clue ||
-                    "No clue available."}
-                </p>
-              </div>
-            </div>
-
-            {/* LOCATION HINT */}
-
-            {locationHint && (
-              <div
-                className="answer-result"
-                style={{
-                  marginBottom: "25px",
-                }}
-              >
-                <MapPin
-                  size={22}
-                />
-
-                <div>
-                  <strong>
-                    LOCATION HINT
-                  </strong>
-
-                  <p>
-                    {locationHint}
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* NO LOCATION CODE */}
-
-            <div
-              style={{
-                marginTop: "25px",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems:
-                    "center",
-                  gap: "8px",
-                  marginBottom:
-                    "10px",
-                }}
-              >
-                <Lock
-                  size={18}
-                />
-
-                <strong>
-                  ENTER HALF CODE
-                </strong>
-              </div>
-
-              <input
-                type="text"
-                value={halfCode}
-                onChange={(e) =>
-                  setHalfCode(
-                    e.target.value
-                  )
-                }
-                placeholder="Enter half code"
-                autoComplete="off"
-                style={{
-                  width: "100%",
-                  padding:
-                    "14px 16px",
-                  fontSize: "18px",
-                  borderRadius:
-                    "10px",
-                  border:
-                    "1px solid #ccc",
-                  outline: "none",
-                  textTransform:
-                    "uppercase",
-                  letterSpacing:
-                    "2px",
-                }}
-              />
-            </div>
-
-            {error && (
-              <div className="game-error">
-                {error}
-              </div>
-            )}
 
             <button
-              className="next-question-btn"
-              onClick={verifyCode}
-              disabled={
-                verifyingCode ||
-                !halfCode.trim()
+              className="finished-home-btn"
+              onClick={() =>
+                navigate("/")
               }
-              style={{
-                marginTop: "20px",
-              }}
             >
-              {verifyingCode
-                ? "VERIFYING..."
-                : "VERIFY HALF CODE"}
-
-              <Unlock size={16} />
+              BACK TO HOME
             </button>
 
           </div>
+
         </main>
+
       </div>
     );
   }
 
-  // =====================================================
-  // NO QUESTION
-  // =====================================================
-
-  if (!question) {
-    return (
-      <div className="student-game-page">
-
-        <div className="student-login-card">
-
-          <Shield size={40} />
-
-          <h2>
-            Unable to Load Question
-          </h2>
-
-          <p>
-            {error ||
-              "Question not available."}
-          </p>
-
-          <button
-            className="start-game-btn"
-            onClick={() =>
-              loadCurrentRound(
-                team?.teamId
-              )
-            }
-          >
-            TRY AGAIN
-          </button>
-
-        </div>
-      </div>
-    );
-  }
-
-  // =====================================================
+  // ====================================================
   // GAME SCREEN
-  // =====================================================
+  // ====================================================
 
   return (
     <div className="student-game-page">
 
-      {/* NAVBAR */}
+      {/* ================================================
+          NAVBAR
+      ================================================= */}
 
       <nav className="student-game-navbar">
 
         <div className="student-game-brand">
 
-          <Shield size={22} />
-
-          <div>
-
-            <strong>
-              CODING HUNT
-            </strong>
-
-            <small>
-              STUDENT ARENA
-            </small>
-
+          <div className="student-brand-icon">
+            <Shield size={24} />
           </div>
+
+          <span>
+            CODING
+            <strong>HUNT</strong>
+          </span>
 
         </div>
 
         <div className="student-team-info">
 
-          <span>
-            {team?.teamName}
-          </span>
+          <div className="team-display">
 
-          <b>
-            {team?.teamId}
-          </b>
+            <span>TEAM</span>
 
-          <span>
-            SET {team?.set || "A"}
-          </span>
+            <strong>
+              {team?.teamId}
+            </strong>
+
+          </div>
+
+          <div className="nav-stat">
+
+            <Trophy size={16} />
+
+            <strong>
+              {score}
+            </strong>
+
+          </div>
+
+          <div className="nav-stat">
+
+            <Heart
+              size={16}
+              fill="currentColor"
+            />
+
+            <strong>
+              {lives}
+            </strong>
+
+          </div>
+
+          <button
+            className="logout-btn"
+            onClick={logout}
+          >
+
+            <LogOut size={16} />
+
+            <span>
+              EXIT
+            </span>
+
+          </button>
 
         </div>
-
-        <button
-          onClick={logout}
-          title="Exit game"
-        >
-          <LogOut size={17} />
-        </button>
 
       </nav>
 
-      {/* GAME HEADER */}
+      {/* ================================================
+          MAIN
+      ================================================= */}
 
-      <div className="game-header">
+      <main className="game-main">
 
-        <div>
-          <small>
-            ROUND
-          </small>
+        {/* ==============================================
+            GAME STATUS BAR
+        =============================================== */}
 
-          <strong>
-            {team?.round}/10
-          </strong>
-        </div>
+        <div className="game-header">
 
-        <div>
-          <small>
-            SCORE
-          </small>
-
-          <strong>
-            {score}
-          </strong>
-        </div>
-
-        <div>
-          <small>
-            LIVES
-          </small>
-
-          <strong>
-            {"❤️".repeat(
-              lives
-            )}
-          </strong>
-        </div>
-
-        <div className="timer-box">
-
-          <Clock size={17} />
-
-          <strong>
-            {String(
-              Math.floor(
-                timeLeft / 60
-              )
-            ).padStart(2, "0")}
-
-            :
-
-            {String(
-              timeLeft % 60
-            ).padStart(2, "0")}
-          </strong>
-
-        </div>
-
-      </div>
-
-      {/* QUESTION */}
-
-      <main className="game-question-area">
-
-        <div className="game-question-card">
-
-          <div className="question-top-line">
+          <div className="round-stat">
 
             <span>
-              SET{" "}
-              {question.set || "A"}
+              ROUND
             </span>
 
-            <span>
-              ROUND{" "}
-              {question.round}
-            </span>
+            <strong>
+              {round}
 
-            <span>
-              {question.marks} POINTS
-            </span>
+              <small>
+                /{totalRounds}
+              </small>
+            </strong>
 
           </div>
 
-          <h1>
-            {question.question}
-          </h1>
+          <div className="progress-stat">
 
-          {/* OPTIONS */}
+            <div className="progress-label">
 
-          <div className="game-options">
+              <span>
+                HUNT PROGRESS
+              </span>
 
-            {[
-              "A",
-              "B",
-              "C",
-              "D",
-            ].map(
-              (option) => {
+              <strong>
+                {Math.round(
+                  (round /
+                    totalRounds) *
+                    100
+                )}
+                %
+              </strong>
 
-                const isSelected =
-                  selectedAnswer ===
-                  option;
+            </div>
 
-                const isCorrect =
-                  option ===
-                  question.answer;
+            <div className="progress-track">
 
-                let className =
-                  "game-option";
+              <div
+                className="progress-fill"
+                style={{
+                  width: `${
+                    (round /
+                      totalRounds) *
+                    100
+                  }%`,
+                }}
+              />
 
-                if (
-                  answered &&
-                  isCorrect
-                ) {
-                  className +=
-                    " game-option-correct";
-                }
+            </div>
 
-                if (
-                  answered &&
-                  isSelected &&
-                  !isCorrect
-                ) {
-                  className +=
-                    " game-option-wrong";
-                }
+          </div>
 
-                if (
-                  !answered &&
-                  isSelected
-                ) {
-                  className +=
-                    " game-option-selected";
-                }
+          {/* TOTAL TIMER */}
 
-                return (
+          <div
+            className={`timer-box ${
+              timeLeft <= 300
+                ? "timer-danger"
+                : ""
+            }`}
+          >
+
+            <Clock size={19} />
+
+            <div>
+
+              <span>
+                TIME LEFT
+              </span>
+
+              <strong>
+                {formatTime(
+                  timeLeft
+                )}
+              </strong>
+
+            </div>
+
+          </div>
+
+        </div>
+
+        {/* ==============================================
+            ERROR
+        =============================================== */}
+
+        {error && (
+          <div className="game-error">
+
+            <AlertTriangle size={17} />
+
+            <span>
+              {error}
+            </span>
+
+          </div>
+        )}
+
+        {/* ==============================================
+            QUESTION SCREEN
+        =============================================== */}
+
+        {question &&
+          !showClue && (
+
+            <section className="game-question-area">
+
+              <div className="question-header">
+
+                <div className="question-category">
+
+                  <Code2 size={16} />
+
+                  CODING CHALLENGE
+
+                </div>
+
+                <div className="question-number">
+
+                  QUESTION #{round}
+
+                </div>
+
+              </div>
+
+              <div className="game-question-card">
+
+                <div className="question-card-top">
+
+                  <span>
+                    CHOOSE THE CORRECT ANSWER
+                  </span>
+
+                  <span>
+                    +POINTS
+                  </span>
+
+                </div>
+
+                <h1>
+                  {question.question}
+                </h1>
+
+                {question.code && (
+                  <pre className="question-code">
+
+                    <code>
+                      {question.code}
+                    </code>
+
+                  </pre>
+                )}
+
+              </div>
+
+              {/* OPTIONS */}
+
+              <div className="game-options">
+
+                {Object.entries(
+                  question.options || {}
+                ).map(
+                  ([key, value]) => {
+
+                    const isSelected =
+                      selectedAnswer ===
+                      key;
+
+                    const isCorrect =
+                      answered &&
+                      correctAnswer ===
+                      key;
+
+                    const isWrong =
+                      answered &&
+                      isSelected &&
+                      !isCorrect;
+
+                    return (
+                      <button
+                        key={key}
+                        className={`
+                          game-option
+                          ${
+                            isSelected
+                              ? "game-option-selected"
+                              : ""
+                          }
+                          ${
+                            isCorrect
+                              ? "game-option-correct"
+                              : ""
+                          }
+                          ${
+                            isWrong
+                              ? "game-option-wrong"
+                              : ""
+                          }
+                        `}
+                        onClick={() =>
+                          handleAnswer(
+                            key
+                          )
+                        }
+                        disabled={
+                          answered ||
+                          loading ||
+                          timeLeft <= 0
+                        }
+                      >
+
+                        <span className="option-key">
+                          {key}
+                        </span>
+
+                        <span className="option-text">
+                          {value}
+                        </span>
+
+                        {isCorrect && (
+                          <CheckCircle
+                            size={21}
+                            className="option-icon"
+                          />
+                        )}
+
+                        {isWrong && (
+                          <XCircle
+                            size={21}
+                            className="option-icon"
+                          />
+                        )}
+
+                      </button>
+                    );
+                  }
+                )}
+
+              </div>
+
+              {/* ANSWER RESULT */}
+
+              {answered && (
+                <div
+                  className={
+                    answerCorrect
+                      ? "answer-result answer-result-correct"
+                      : "answer-result answer-result-wrong"
+                  }
+                >
+
+                  {answerCorrect ? (
+                    <>
+                      <CheckCircle
+                        size={21}
+                      />
+
+                      <div>
+
+                        <strong>
+                          CORRECT ANSWER
+                        </strong>
+
+                        <span>
+                          Excellent! The next
+                          clue is now unlocked.
+                        </span>
+
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <XCircle
+                        size={21}
+                      />
+
+                      <div>
+
+                        <strong>
+                          WRONG ANSWER
+                        </strong>
+
+                        <span>
+                          The correct answer is
+                          highlighted in green.
+                        </span>
+
+                      </div>
+                    </>
+                  )}
+
+                </div>
+              )}
+
+              {/* RETRY */}
+
+              {answered &&
+                !answerCorrect &&
+                lives > 0 &&
+                timeLeft > 0 && (
+
                   <button
-                    key={option}
-                    className={
-                      className
+                    className="retry-btn"
+                    onClick={
+                      handleRetry
+                    }
+                  >
+                    TRY AGAIN
+                  </button>
+
+                )}
+
+              {/* NEXT */}
+
+              {answered &&
+                answerCorrect &&
+                timeLeft > 0 && (
+
+                  <button
+                    className="next-question-btn"
+                    onClick={
+                      handleNext
                     }
                     disabled={
-                      answered ||
-                      loading
-                    }
-                    onClick={() =>
-                      handleAnswer(
-                        option
-                      )
+                      loadingClue
                     }
                   >
 
-                    <span className="game-option-letter">
-                      {option}
+                    {loadingClue
+                      ? "UNLOCKING..."
+                      : "UNLOCK CLUE"}
+
+                    <span>
+                      →
                     </span>
-
-                    <span className="game-option-text">
-                      {
-                        question
-                          .options?.[
-                          option
-                        ]
-                      }
-                    </span>
-
-                    {answered &&
-                      isCorrect && (
-                        <CheckCircle
-                          size={18}
-                        />
-                      )}
-
-                    {answered &&
-                      isSelected &&
-                      !isCorrect && (
-                        <XCircle
-                          size={18}
-                        />
-                      )}
 
                   </button>
-                );
-              }
-            )}
 
-          </div>
+                )}
 
-          {/* RESULT */}
+            </section>
+          )}
 
-          {answered && (
-            <div
-              className={
-                answerCorrect
-                  ? "answer-result answer-result-correct"
-                  : "answer-result answer-result-wrong"
-              }
-            >
+        {/* ==============================================
+            CLUE SCREEN
+        =============================================== */}
 
-              {answerCorrect ? (
-                <>
-                  <CheckCircle
-                    size={20}
-                  />
+        {showClue && (
+
+          <section className="clue-section">
+
+            <div className="clue-card">
+
+              <div className="clue-success-icon">
+
+                <Lock size={30} />
+
+              </div>
+
+              <div className="finished-badge">
+                CLUE UNLOCKED
+              </div>
+
+              <h2>
+                FIND THE NEXT LOCATION
+              </h2>
+
+              <p className="clue-text">
+
+                {clue ||
+                  "Your next clue has been unlocked."}
+
+              </p>
+
+              {/* LOCATION */}
+
+              {locationName && (
+
+                <div className="location-box">
+
+                  <div className="location-icon">
+
+                    <MapPin size={22} />
+
+                  </div>
 
                   <div>
 
-                    <strong>
-                      Correct Answer!
-                    </strong>
-
-                    <p>
-                      +
-                      {
-                        question.marks
-                      }{" "}
-                      points
-                    </p>
-
-                  </div>
-                </>
-              ) : (
-                <>
-                  <XCircle
-                    size={20}
-                  />
-
-                  <div>
+                    <span>
+                      LOCATION
+                    </span>
 
                     <strong>
-                      Incorrect Answer
+                      {locationName}
                     </strong>
 
-                    <p>
-                      You lost one
-                      life.
-                    </p>
-
                   </div>
-                </>
+
+                </div>
               )}
 
-            </div>
-          )}
+              {/* HINT */}
 
-          {/* ERROR */}
+              {locationHint && (
 
-          {error && (
-            <div className="game-error">
-              {error}
-            </div>
-          )}
+                <div className="location-hint">
 
-          {/* NEXT */}
+                  <span>
+                    LOCATION HINT
+                  </span>
 
-          {answered &&
-            answerCorrect && (
-              <button
-                className="next-question-btn"
-                onClick={
-                  handleNext
-                }
-                disabled={
-                  loadingClue
-                }
-              >
-                {loadingClue
-                  ? "LOADING CLUE..."
-                  : "NEXT"}
+                  <p>
+                    {locationHint}
+                  </p>
 
-                <Play size={16} />
-              </button>
-            )}
+                </div>
+              )}
 
-          {/* WRONG ANSWER MESSAGE */}
+              {/* HALF CODE */}
 
-          {answered &&
-            !answerCorrect &&
-            lives > 0 && (
-              <div
-                style={{
-                  marginTop:
-                    "20px",
-                  textAlign:
-                    "center",
-                  fontWeight:
-                    "600",
-                }}
-              >
-                You need the correct
-                answer to unlock the
-                clue.
+              <div className="half-code-section">
+
+                <div className="half-code-heading">
+
+                  <div>
+                    <KeyRoundIcon />
+                  </div>
+
+                  <div>
+
+                    <h3>
+                      ENTER HALF CODE
+                    </h3>
+
+                    <p>
+                      Enter the code found at
+                      the location.
+                    </p>
+
+                  </div>
+
+                </div>
+
+                <input
+                  className="half-code-input"
+                  type="text"
+                  placeholder="ENTER CODE"
+                  value={halfCode}
+                  onChange={(event) =>
+                    setHalfCode(
+                      event.target.value
+                    )
+                  }
+                  disabled={
+                    verifyingCode ||
+                    codeVerified ||
+                    timeLeft <= 0
+                  }
+                  autoComplete="off"
+                />
+
+                <button
+                  className="verify-code-btn"
+                  onClick={
+                    verifyCode
+                  }
+                  disabled={
+                    verifyingCode ||
+                    codeVerified ||
+                    timeLeft <= 0
+                  }
+                >
+
+                  {codeVerified
+                    ? "CODE VERIFIED ✓"
+                    : verifyingCode
+                    ? "VERIFYING..."
+                    : "VERIFY HALF CODE →"}
+
+                </button>
+
               </div>
-            )}
 
-        </div>
+            </div>
+
+          </section>
+        )}
+
+        {message && (
+          <div className="game-message">
+
+            <CheckCircle size={17} />
+
+            {message}
+
+          </div>
+        )}
+
       </main>
 
     </div>
+  );
+}
+
+// ======================================================
+// SMALL ICON HELPER
+// ======================================================
+
+function KeyRoundIcon() {
+  return (
+    <Lock size={20} />
   );
 }
 
