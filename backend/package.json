@@ -6,7 +6,12 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+
+    "server1": "node servers/server1.js",
+    "server2": "node servers/server2.js",
+    "server3": "node servers/server3.js",
+    "server4": "node servers/server4.js"
   },
   "keywords": [
     "coding-hunt",

@@ -23,6 +23,8 @@ import {
   Zap,
 } from "lucide-react";
 
+import { io } from "socket.io-client";
+
 import "./PlayGame.css";
 
 import { startAntiCheat } from "../utils/anticheat";
@@ -35,9 +37,13 @@ const API_URL =
   import.meta.env.VITE_API_URL ||
   "http://localhost:5000/api";
 
+const SOCKET_URL = API_URL.replace(
+  /\/api\/?$/,
+  ""
+);
+
 // ======================================================
 // TOTAL GAME TIME
-// 60 MINUTES = 3600 SECONDS
 // ======================================================
 
 const DEFAULT_TOTAL_GAME_TIME = 60 * 60;
@@ -72,7 +78,6 @@ function PlayGame() {
   const [score, setScore] = useState(0);
   const [lives, setLives] = useState(3);
 
-  // TOTAL GAME TIMER
   const [timeLeft, setTimeLeft] = useState(
     DEFAULT_TOTAL_GAME_TIME
   );
@@ -91,6 +96,12 @@ function PlayGame() {
     useState(false);
 
   const [gameFinished, setGameFinished] =
+    useState(false);
+
+  const [gamePaused, setGamePaused] =
+    useState(false);
+
+  const [waitingForAdmin, setWaitingForAdmin] =
     useState(false);
 
   const [answered, setAnswered] =
@@ -157,6 +168,14 @@ function PlayGame() {
   const violationReported =
     useRef(false);
 
+  const teamRef = useRef(null);
+  const socketRef = useRef(null);
+
+  // Keep latest team in ref
+  useEffect(() => {
+    teamRef.current = team;
+  }, [team]);
+
   // ====================================================
   // LOAD CURRENT ROUND
   // ====================================================
@@ -196,6 +215,7 @@ function PlayGame() {
           setTeam(data.team);
           setEliminated(true);
           setGameStarted(false);
+          setWaitingForAdmin(false);
           return;
         }
 
@@ -221,6 +241,7 @@ function PlayGame() {
 
           setGameFinished(true);
           setGameStarted(false);
+          setWaitingForAdmin(false);
 
           return;
         }
@@ -236,15 +257,6 @@ function PlayGame() {
         // -------------------------------
         // TOTAL GAME TIME
         // -------------------------------
-
-        /*
-          Backend can send:
-          totalGameTime
-          gameTime
-          totalTime
-
-          Otherwise default = 60 minutes.
-        */
 
         const backendTotalTime =
           Number(
@@ -268,14 +280,6 @@ function PlayGame() {
         // -------------------------------
         // REMAINING TIME
         // -------------------------------
-
-        /*
-          If backend sends remainingTime,
-          use it.
-
-          Otherwise DO NOT reset the
-          existing timer.
-        */
 
         if (
           data.remainingTime !==
@@ -365,10 +369,13 @@ function PlayGame() {
         setHalfCode("");
         setCodeVerified(false);
 
-        // IMPORTANT:
-        // NO TIMER RESET HERE
+        // -------------------------------
+        // GAME ACTIVE
+        // -------------------------------
 
         setGameStarted(true);
+        setGamePaused(false);
+        setWaitingForAdmin(false);
         setGameFinished(false);
       } catch (err) {
         console.error(
@@ -388,7 +395,219 @@ function PlayGame() {
   );
 
   // ====================================================
-  // START GAME
+  // ADMIN GAME CONTROL + TEAM SOCKET
+  // ====================================================
+
+  useEffect(() => {
+    const socket = io(SOCKET_URL, {
+      transports: ["websocket", "polling"],
+    });
+
+    socketRef.current = socket;
+
+    const applyGameState = async (game) => {
+      const status = game?.status;
+
+      if (status === "RUNNING") {
+        setGamePaused(false);
+        setGameFinished(false);
+        setWaitingForAdmin(false);
+
+        const currentTeam = teamRef.current;
+
+        if (currentTeam?.teamId && !eliminated) {
+          await loadCurrentRound(currentTeam.teamId);
+        }
+        return;
+      }
+
+      if (status === "PAUSED") {
+        setGamePaused(true);
+        setGameStarted(false);
+        setWaitingForAdmin(false);
+        setMessage("GAME PAUSED BY ADMIN");
+
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
+        return;
+      }
+
+      if (status === "ENDED") {
+        setGamePaused(false);
+        setGameStarted(false);
+        setWaitingForAdmin(false);
+        setGameFinished(true);
+        setQuestion(null);
+        setShowClue(false);
+        setMessage("GAME ENDED BY ADMIN");
+
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
+        return;
+      }
+
+      // READY / RESET
+      setGamePaused(false);
+      setGameStarted(false);
+      setGameFinished(false);
+      setWaitingForAdmin(!!teamRef.current?.teamId);
+      setQuestion(null);
+      setShowClue(false);
+      setMessage(
+        teamRef.current?.teamId
+          ? "GAME RESET. Waiting for admin to start the hunt..."
+          : ""
+      );
+
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+
+    socket.on("connect", async () => {
+      console.log("Game socket connected:", socket.id);
+
+      const currentTeam = teamRef.current;
+
+      if (currentTeam?.teamId) {
+        socket.emit("join-team", currentTeam.teamId);
+      }
+
+      // IMPORTANT:
+      // Fetch current game state so players who join AFTER
+      // admin START/PAUSE/END also get the correct state.
+      try {
+        const response = await fetch(`${API_URL}/game/status`);
+        const data = await response.json();
+
+        if (response.ok && data.game) {
+          await applyGameState(data.game);
+        }
+      } catch (err) {
+        console.error("GAME STATUS ERROR:", err);
+      }
+    });
+
+    socket.on("game-state", async (game) => {
+      await applyGameState(game);
+    });
+
+    socket.on("game-started", async (game) => {
+      console.log("ADMIN STARTED GAME", game);
+
+      const currentTeam = teamRef.current;
+
+      setGamePaused(false);
+      setWaitingForAdmin(false);
+      setGameFinished(false);
+      setMessage("HUNT STARTED! Good luck.");
+
+      if (currentTeam?.teamId && !eliminated) {
+        await loadCurrentRound(currentTeam.teamId);
+      }
+    });
+
+    socket.on("game-paused", () => {
+      console.log("ADMIN PAUSED GAME");
+
+      setGamePaused(true);
+      setGameStarted(false);
+      setWaitingForAdmin(false);
+      setMessage("GAME PAUSED BY ADMIN");
+
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    });
+
+    socket.on("game-reset", () => {
+      console.log("ADMIN RESET GAME");
+
+      setGamePaused(false);
+      setGameStarted(false);
+      setGameFinished(false);
+      setWaitingForAdmin(!!teamRef.current?.teamId);
+      setQuestion(null);
+      setSelectedAnswer("");
+      setCorrectAnswer("");
+      setAnswered(false);
+      setAnswerCorrect(null);
+      setClue("");
+      setLocationHint("");
+      setLocationName("");
+      setShowClue(false);
+      setHalfCode("");
+      setCodeVerified(false);
+      setTimeLeft(totalGameTime);
+      setMessage(
+        teamRef.current?.teamId
+          ? "GAME RESET. Waiting for admin to start the hunt..."
+          : "GAME RESET."
+      );
+
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    });
+
+    socket.on("game-ended", () => {
+      console.log("ADMIN ENDED GAME");
+
+      setGamePaused(false);
+      setGameStarted(false);
+      setWaitingForAdmin(false);
+      setGameFinished(true);
+      setQuestion(null);
+      setShowClue(false);
+      setMessage("GAME ENDED BY ADMIN");
+
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    });
+
+    socket.on("team-eliminated", (data) => {
+      const currentTeam = teamRef.current;
+
+      if (
+        !currentTeam?.teamId ||
+        data?.teamId !== currentTeam.teamId
+      ) {
+        return;
+      }
+
+      setEliminated(true);
+      setGameStarted(false);
+      setGamePaused(false);
+      setWaitingForAdmin(false);
+      setQuestion(null);
+
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    });
+
+    socket.on("disconnect", () => {
+      console.log("Game socket disconnected");
+    });
+
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [loadCurrentRound]);
+
+  // ====================================================
+  // START GAME / PLAYER LOGIN
   // ====================================================
 
   const startGame = async (event) => {
@@ -461,6 +680,14 @@ function PlayGame() {
       // -------------------------------
 
       setTeam(verifiedTeam);
+      teamRef.current = verifiedTeam;
+
+      if (socketRef.current?.connected) {
+        socketRef.current.emit(
+          "join-team",
+          verifiedTeam.teamId
+        );
+      }
 
       localStorage.setItem(
         "codingHuntCurrentTeam",
@@ -473,13 +700,8 @@ function PlayGame() {
         false;
 
       // -------------------------------
-      // INITIAL TIMER
+      // TIMER
       // -------------------------------
-
-      /*
-        Only initialize timer when
-        starting a NEW hunt.
-      */
 
       const serverTime =
         Number(
@@ -506,21 +728,91 @@ function PlayGame() {
       }
 
       // -------------------------------
-      // LOAD GAME
+      // IMPORTANT
       // -------------------------------
+      // DO NOT LOAD QUESTION DIRECTLY.
+      // First check the CURRENT ADMIN GAME STATE.
+      // This also supports players joining after admin
+      // has already started/paused/ended the game.
 
-      await loadCurrentRound(
-        verifiedTeam.teamId
-      );
+      setGameStarted(false);
+      setGamePaused(false);
+      setGameFinished(false);
+      setWaitingForAdmin(true);
+
+      try {
+        const statusResponse = await fetch(
+          `${API_URL}/game/status`
+        );
+
+        const statusData =
+          await statusResponse.json();
+
+        if (
+          statusResponse.ok &&
+          statusData.game
+        ) {
+          const status =
+            statusData.game.status;
+
+          if (status === "RUNNING") {
+            setWaitingForAdmin(false);
+            setGamePaused(false);
+            setMessage(
+              "HUNT IS LIVE! Loading your challenge..."
+            );
+
+            await loadCurrentRound(
+              verifiedTeam.teamId
+            );
+          } else if (
+            status === "PAUSED"
+          ) {
+            setWaitingForAdmin(false);
+            setGamePaused(true);
+            setMessage(
+              "GAME PAUSED BY ADMIN"
+            );
+          } else if (
+            status === "ENDED"
+          ) {
+            setWaitingForAdmin(false);
+            setGameFinished(true);
+            setMessage(
+              "GAME ENDED BY ADMIN"
+            );
+          } else {
+            setWaitingForAdmin(true);
+            setMessage(
+              "Team verified. Waiting for admin to start the hunt..."
+            );
+          }
+        } else {
+          setWaitingForAdmin(true);
+          setMessage(
+            "Team verified. Waiting for admin to start the hunt..."
+          );
+        }
+      } catch (statusError) {
+        console.error(
+          "GAME STATUS CHECK ERROR:",
+          statusError
+        );
+
+        setWaitingForAdmin(true);
+        setMessage(
+          "Team verified. Waiting for admin to start the hunt..."
+        );
+      }
     } catch (err) {
       console.error(
-        "START GAME ERROR:",
+        "PLAYER LOGIN ERROR:",
         err
       );
 
       setError(
         err.message ||
-          "Unable to start game."
+          "Unable to verify team."
       );
     } finally {
       setLoading(false);
@@ -540,7 +832,7 @@ function PlayGame() {
       }
 
       const currentTeam =
-        team ||
+        teamRef.current ||
         (() => {
           try {
             const saved =
@@ -563,12 +855,10 @@ function PlayGame() {
       violationReported.current =
         true;
 
-      // -------------------------------
-      // STOP GAME
-      // -------------------------------
-
       setGameStarted(false);
       setGameFinished(false);
+      setGamePaused(false);
+      setWaitingForAdmin(false);
       setQuestion(null);
       setAnswered(false);
       setSelectedAnswer("");
@@ -576,10 +866,6 @@ function PlayGame() {
       setShowClue(false);
       setEliminated(true);
       setError("");
-
-      // -------------------------------
-      // STOP TIMER
-      // -------------------------------
 
       if (timerRef.current) {
         clearInterval(
@@ -589,10 +875,6 @@ function PlayGame() {
         timerRef.current = null;
       }
 
-      // -------------------------------
-      // STOP ANTI CHEAT
-      // -------------------------------
-
       if (
         antiCheatCleanupRef.current
       ) {
@@ -601,10 +883,6 @@ function PlayGame() {
         antiCheatCleanupRef.current =
           null;
       }
-
-      // -------------------------------
-      // LOCAL ELIMINATION
-      // -------------------------------
 
       const eliminatedTeam = {
         ...currentTeam,
@@ -620,10 +898,6 @@ function PlayGame() {
           eliminatedTeam
         )
       );
-
-      // -------------------------------
-      // BACKEND
-      // -------------------------------
 
       try {
         const response =
@@ -693,7 +967,7 @@ function PlayGame() {
         );
       }
     },
-    [team]
+    []
   );
 
   // ====================================================
@@ -704,6 +978,7 @@ function PlayGame() {
     if (
       !team?.teamId ||
       !gameStarted ||
+      gamePaused ||
       eliminated ||
       gameFinished
     ) {
@@ -737,6 +1012,7 @@ function PlayGame() {
   }, [
     team?.teamId,
     gameStarted,
+    gamePaused,
     eliminated,
     gameFinished,
     reportViolation,
@@ -749,6 +1025,7 @@ function PlayGame() {
   useEffect(() => {
     if (
       !gameStarted ||
+      gamePaused ||
       eliminated ||
       gameFinished
     ) {
@@ -801,6 +1078,7 @@ function PlayGame() {
     };
   }, [
     gameStarted,
+    gamePaused,
     eliminated,
     gameFinished,
   ]);
@@ -816,6 +1094,7 @@ function PlayGame() {
       answered ||
       !question ||
       eliminated ||
+      gamePaused ||
       !team?.teamId ||
       timeLeft <= 0
     ) {
@@ -861,10 +1140,6 @@ function PlayGame() {
         );
       }
 
-      // -------------------------------
-      // CORRECT ANSWER
-      // -------------------------------
-
       setCorrectAnswer(
         data.correctAnswer || ""
       );
@@ -875,29 +1150,17 @@ function PlayGame() {
 
       setAnswered(true);
 
-      // -------------------------------
-      // SCORE
-      // -------------------------------
-
       setScore(
         data.score ??
           team.score ??
           0
       );
 
-      // -------------------------------
-      // LIVES
-      // -------------------------------
-
       setLives(
         data.lives ??
           team.lives ??
           3
       );
-
-      // -------------------------------
-      // UPDATE TEAM
-      // -------------------------------
 
       setTeam(
         (previous) => ({
@@ -919,10 +1182,6 @@ function PlayGame() {
         })
       );
 
-      // -------------------------------
-      // ELIMINATED
-      // -------------------------------
-
       if (
         data.status ===
         "Eliminated"
@@ -932,10 +1191,6 @@ function PlayGame() {
         setQuestion(null);
         return;
       }
-
-      // -------------------------------
-      // COMPLETED
-      // -------------------------------
 
       if (
         data.completed === true ||
@@ -967,6 +1222,7 @@ function PlayGame() {
     if (
       lives <= 0 ||
       eliminated ||
+      gamePaused ||
       timeLeft <= 0
     ) {
       return;
@@ -978,9 +1234,6 @@ function PlayGame() {
     setAnswered(false);
     setError("");
     setMessage("");
-
-    // IMPORTANT:
-    // TIMER IS NOT RESET
   };
 
   // ====================================================
@@ -991,6 +1244,7 @@ function PlayGame() {
     if (
       !team?.teamId ||
       !question?.questionId ||
+      gamePaused ||
       timeLeft <= 0
     ) {
       return;
@@ -1055,6 +1309,7 @@ function PlayGame() {
     if (
       !answerCorrect ||
       eliminated ||
+      gamePaused ||
       timeLeft <= 0
     ) {
       return;
@@ -1080,9 +1335,12 @@ function PlayGame() {
       return;
     }
 
-    if (timeLeft <= 0) {
+    if (
+      timeLeft <= 0 ||
+      gamePaused
+    ) {
       setError(
-        "Time is over."
+        "Game is not active."
       );
 
       return;
@@ -1129,10 +1387,6 @@ function PlayGame() {
         );
       }
 
-      // -------------------------------
-      // COMPLETED
-      // -------------------------------
-
       if (
         data.completed === true ||
         data.status === "Completed"
@@ -1141,10 +1395,6 @@ function PlayGame() {
         setGameStarted(false);
         return;
       }
-
-      // -------------------------------
-      // VERIFIED
-      // -------------------------------
 
       setCodeVerified(true);
 
@@ -1167,10 +1417,6 @@ function PlayGame() {
           )
         );
       }
-
-      // IMPORTANT:
-      // loadCurrentRound DOES NOT
-      // RESET TOTAL TIMER
 
       await loadCurrentRound(
         nextTeam.teamId
@@ -1217,10 +1463,13 @@ function PlayGame() {
     );
 
     setTeam(null);
+    teamRef.current = null;
     setTeamId("");
     setStartCode("");
     setQuestion(null);
     setGameStarted(false);
+    setGamePaused(false);
+    setWaitingForAdmin(false);
     setGameFinished(false);
     setEliminated(false);
     setError("");
@@ -1371,7 +1620,8 @@ function PlayGame() {
   if (
     !team &&
     !gameStarted &&
-    !gameFinished
+    !gameFinished &&
+    !waitingForAdmin
   ) {
     return (
       <div className="student-game-page">
@@ -1487,7 +1737,7 @@ function PlayGame() {
                 ) : (
                   <>
                     <Zap size={18} />
-                    START HUNT
+                    JOIN HUNT
                   </>
                 )}
 
@@ -1513,9 +1763,7 @@ function PlayGame() {
 
               <div>
                 <Clock size={17} />
-                <strong>
-                  60
-                </strong>
+                <strong>60</strong>
                 <span>MINUTES</span>
               </div>
 
@@ -1533,6 +1781,251 @@ function PlayGame() {
 
               Do not switch tabs during
               the hunt.
+
+            </div>
+
+          </div>
+
+        </main>
+
+      </div>
+    );
+  }
+
+  // ====================================================
+  // WAITING FOR ADMIN
+  // ====================================================
+
+  if (
+    team &&
+    waitingForAdmin &&
+    !gameStarted &&
+    !gamePaused &&
+    !gameFinished
+  ) {
+    return (
+      <div className="student-game-page">
+
+        <nav className="student-game-navbar">
+
+          <div className="student-game-brand">
+
+            <div className="student-brand-icon">
+              <Shield size={24} />
+            </div>
+
+            <span>
+              CODING
+              <strong>HUNT</strong>
+            </span>
+
+          </div>
+
+        </nav>
+
+        <main className="student-login-wrapper">
+
+          <div className="student-login-card">
+
+            <div className="login-logo">
+              <Shield size={38} />
+            </div>
+
+            <div className="login-badge">
+              TEAM VERIFIED
+            </div>
+
+            <h1>
+              READY TO HUNT
+            </h1>
+
+            <p className="login-subtitle">
+              Team{" "}
+              <strong>
+                {team.teamId}
+              </strong>{" "}
+              is successfully verified.
+            </p>
+
+            <div
+              style={{
+                marginTop: "30px",
+                padding: "24px",
+                border:
+                  "1px solid rgba(0,255,120,0.25)",
+                borderRadius: "14px",
+                textAlign: "center",
+                background:
+                  "rgba(0,255,120,0.05)",
+              }}
+            >
+
+              <div
+                style={{
+                  fontSize: "38px",
+                  marginBottom: "14px",
+                }}
+              >
+                ⏳
+              </div>
+
+              <h3>
+                WAITING FOR ADMIN
+              </h3>
+
+              <p
+                style={{
+                  marginTop: "8px",
+                  opacity: 0.7,
+                  fontSize: "14px",
+                }}
+              >
+                The hunt will start
+                simultaneously for all
+                teams.
+              </p>
+
+              <div
+                style={{
+                  marginTop: "20px",
+                  display: "flex",
+                  justifyContent:
+                    "center",
+                  alignItems: "center",
+                  gap: "8px",
+                }}
+              >
+
+                <span
+                  style={{
+                    width: "8px",
+                    height: "8px",
+                    borderRadius: "50%",
+                    background:
+                      "#00ff78",
+                    boxShadow:
+                      "0 0 12px #00ff78",
+                  }}
+                />
+
+                ADMIN CONTROL ACTIVE
+
+              </div>
+
+            </div>
+
+            {message && (
+              <div
+                className="game-message"
+                style={{
+                  marginTop: "20px",
+                }}
+              >
+                <Clock size={17} />
+                {message}
+              </div>
+            )}
+
+            <button
+              className="finished-home-btn"
+              style={{
+                marginTop: "22px",
+              }}
+              onClick={logout}
+            >
+              <LogOut size={16} />
+              EXIT
+            </button>
+
+          </div>
+
+        </main>
+
+      </div>
+    );
+  }
+
+  // ====================================================
+  // GAME PAUSED
+  // ====================================================
+
+  if (
+    team &&
+    gamePaused &&
+    !gameFinished &&
+    !eliminated
+  ) {
+    return (
+      <div className="student-game-page">
+
+        <nav className="student-game-navbar">
+
+          <div className="student-game-brand">
+
+            <div className="student-brand-icon">
+              <Shield size={24} />
+            </div>
+
+            <span>
+              CODING
+              <strong>HUNT</strong>
+            </span>
+
+          </div>
+
+        </nav>
+
+        <main className="student-login-wrapper">
+
+          <div className="student-login-card">
+
+            <div className="login-logo">
+              <Clock size={38} />
+            </div>
+
+            <div className="login-badge">
+              GAME PAUSED
+            </div>
+
+            <h1>
+              HUNT PAUSED
+            </h1>
+
+            <p className="login-subtitle">
+              The administrator has
+              temporarily paused the hunt.
+            </p>
+
+            <div
+              style={{
+                marginTop: "30px",
+                padding: "24px",
+                border:
+                  "1px solid rgba(255,255,255,0.12)",
+                borderRadius: "14px",
+                textAlign: "center",
+              }}
+            >
+
+              <Clock size={30} />
+
+              <h3
+                style={{
+                  marginTop: "12px",
+                }}
+              >
+                PLEASE WAIT
+              </h3>
+
+              <p
+                style={{
+                  marginTop: "8px",
+                  opacity: 0.65,
+                }}
+              >
+                The game will resume when
+                the admin starts it again.
+              </p>
 
             </div>
 
@@ -1639,9 +2132,7 @@ function PlayGame() {
   return (
     <div className="student-game-page">
 
-      {/* ================================================
-          NAVBAR
-      ================================================= */}
+      {/* NAVBAR */}
 
       <nav className="student-game-navbar">
 
@@ -1710,15 +2201,11 @@ function PlayGame() {
 
       </nav>
 
-      {/* ================================================
-          MAIN
-      ================================================= */}
+      {/* MAIN */}
 
       <main className="game-main">
 
-        {/* ==============================================
-            GAME STATUS BAR
-        =============================================== */}
+        {/* GAME STATUS BAR */}
 
         <div className="game-header">
 
@@ -1774,7 +2261,7 @@ function PlayGame() {
 
           </div>
 
-          {/* TOTAL TIMER */}
+          {/* TIMER */}
 
           <div
             className={`timer-box ${
@@ -1804,9 +2291,19 @@ function PlayGame() {
 
         </div>
 
-        {/* ==============================================
-            ERROR
-        =============================================== */}
+        {/* ADMIN STATUS */}
+
+        {message && (
+          <div className="game-message">
+
+            <CheckCircle size={17} />
+
+            {message}
+
+          </div>
+        )}
+
+        {/* ERROR */}
 
         {error && (
           <div className="game-error">
@@ -1820,9 +2317,7 @@ function PlayGame() {
           </div>
         )}
 
-        {/* ==============================================
-            QUESTION SCREEN
-        =============================================== */}
+        {/* QUESTION */}
 
         {question &&
           !showClue && (
@@ -1929,6 +2424,7 @@ function PlayGame() {
                         disabled={
                           answered ||
                           loading ||
+                          gamePaused ||
                           timeLeft <= 0
                         }
                       >
@@ -2065,9 +2561,7 @@ function PlayGame() {
             </section>
           )}
 
-        {/* ==============================================
-            CLUE SCREEN
-        =============================================== */}
+        {/* CLUE */}
 
         {showClue && (
 
@@ -2178,6 +2672,7 @@ function PlayGame() {
                   disabled={
                     verifyingCode ||
                     codeVerified ||
+                    gamePaused ||
                     timeLeft <= 0
                   }
                   autoComplete="off"
@@ -2191,6 +2686,7 @@ function PlayGame() {
                   disabled={
                     verifyingCode ||
                     codeVerified ||
+                    gamePaused ||
                     timeLeft <= 0
                   }
                 >
@@ -2208,16 +2704,6 @@ function PlayGame() {
             </div>
 
           </section>
-        )}
-
-        {message && (
-          <div className="game-message">
-
-            <CheckCircle size={17} />
-
-            {message}
-
-          </div>
         )}
 
       </main>

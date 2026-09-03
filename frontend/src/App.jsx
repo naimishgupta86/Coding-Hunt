@@ -7,7 +7,8 @@ import QuestionManagement from "./pages/QuestionManagement";
 import PlayGame from "./pages/PlayGame";
 import StudentGame from "./pages/StudentGame";
 import AdminDashboard from "./pages/AdminDashboard";
-
+import RoundManagement from "./pages/RoundManagement";
+import Results from "./pages/Results";
 
 
 function App() {
@@ -49,8 +50,10 @@ function App() {
           element={<AdminDashboard />}
         />
 
+        <Route path="/admin/results" element={<Results />} />
 
-    
+
+       <Route path="/admin/rounds" element={<RoundManagement />} />
 
       </Routes>
       
