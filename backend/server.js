@@ -1,3 +1,4 @@
+
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -17,337 +18,285 @@ dotenv.config();
 // CONFIG
 // ==================================================
 
-const CLIENT_URL =
-  process.env.CLIENT_URL || "http://localhost:5173";
+const PORT = Number(process.env.PORT) || 5000;
 
-const SERVER_CONFIG = [
-  {
-    name: "SERVER-1",
-    port: 5000,
-  },
-  {
-    name: "SERVER-2",
-    port: 5001,
-  },
-  {
-    name: "SERVER-3",
-    port: 5002,
-  },
-  {
-    name: "SERVER-4",
-    port: 5003,
-  },
-];
+const CLIENT_URLS = (
+  process.env.CLIENT_URL || "http://localhost:5173"
+)
+  .split(",")
+  .map((url) => url.trim())
+  .filter(Boolean);
+
+const SERVER_NAME = "SERVER-1";
 
 // ==================================================
-// CREATE SERVER
+// APP AND HTTP SERVER
 // ==================================================
 
-const createServer = (serverName, port) => {
-  const app = express();
+const app = express();
+const httpServer = http.createServer(app);
 
-  const server = http.createServer(app);
+// ==================================================
+// SOCKET.IO
+// ==================================================
 
-  // ------------------------------------------------
-  // SERVER INFORMATION
-  // ------------------------------------------------
+const io = new Server(httpServer, {
+  cors: {
+    origin: CLIENT_URLS,
+    methods: ["GET", "POST", "PUT", "DELETE"],
+  },
+});
 
-  app.set("serverName", serverName);
-  app.set("serverPort", port);
+app.set("io", io);
+app.set("serverName", SERVER_NAME);
+app.set("serverPort", PORT);
 
-  // ==================================================
-  // SOCKET.IO
-  // ==================================================
+// ==================================================
+// MIDDLEWARE
+// ==================================================
 
-  const io = new Server(server, {
-    cors: {
-      origin: CLIENT_URL,
-      methods: ["GET", "POST", "PUT", "DELETE"],
-    },
+app.use(
+  cors({
+    origin: CLIENT_URLS,
+    methods: ["GET", "POST", "PUT", "DELETE"],
+  })
+);
+
+app.use(express.json());
+
+// ==================================================
+// HEALTH CHECK ROUTES
+// ==================================================
+
+app.get("/", (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "CODING HUNT SERVER RUNNING",
+    server: SERVER_NAME,
+    port: PORT,
+    status: "ONLINE",
+    timestamp: new Date().toISOString(),
   });
+});
 
-  app.set("io", io);
+app.get("/test", (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "Coding Hunt API running",
+    server: SERVER_NAME,
+  });
+});
 
-  // ==================================================
-  // MIDDLEWARE
-  // ==================================================
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    success: true,
+    server: SERVER_NAME,
+    status: "ONLINE",
+    timestamp: new Date().toISOString(),
+  });
+});
 
-  app.use(
-    cors({
-      origin: CLIENT_URL,
-      methods: ["GET", "POST", "PUT", "DELETE"],
-    })
+app.get("/server-info", (req, res) => {
+  res.status(200).json({
+    success: true,
+    server: SERVER_NAME,
+    port: PORT,
+    status: "ONLINE",
+    socket: "ACTIVE",
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ==================================================
+// API ROUTES
+// ==================================================
+
+app.use("/api/teams", teamRoutes);
+app.use("/api/questions", questionRoutes);
+app.use("/api/game", gameRoutes);
+app.use("/api/monitor", monitorRoutes);
+
+// ==================================================
+// SOCKET.IO CONNECTION
+// ==================================================
+
+let gameStatus = "READY";
+
+io.on("connection", (socket) => {
+  console.log(
+    `[${SERVER_NAME}] Client connected: ${socket.id}`
   );
 
-  app.use(express.json());
-
-  // ==================================================
-  // API ROUTES
-  // ==================================================
-
-  app.use("/api/teams", teamRoutes);
-
-  app.use("/api/questions", questionRoutes);
-
-  app.use("/api/game", gameRoutes);
-
-  app.use("/api/monitor", monitorRoutes);
-
-  // ==================================================
-  // ROOT
-  // ==================================================
-
-  app.get("/", (req, res) => {
-    res.status(200).json({
-      success: true,
-      message: "CODING HUNT SERVER RUNNING",
-      server: serverName,
-      port,
-      status: "ONLINE",
-      timestamp: new Date().toISOString(),
-    });
+  // Send current game status to newly connected clients
+  socket.emit("game-state", {
+    status: gameStatus,
+    server: SERVER_NAME,
   });
 
-  // ==================================================
-  // HEALTH CHECK
-  // ==================================================
+  // JOIN TEAM
+  socket.on("join-team", (teamId) => {
+    if (!teamId) return;
 
-  app.get("/health", (req, res) => {
-    res.status(200).json({
-      success: true,
-      server: serverName,
-      port,
-      status: "ONLINE",
-      timestamp: new Date().toISOString(),
-    });
-  });
+    socket.join(`team-${teamId}`);
 
-  // ==================================================
-  // SERVER INFO
-  // ==================================================
-
-  app.get("/server-info", (req, res) => {
-    res.status(200).json({
-      success: true,
-      server: serverName,
-      port,
-      status: "ONLINE",
-      socket: "ACTIVE",
-      timestamp: new Date().toISOString(),
-    });
-  });
-
-  // ==================================================
-  // SOCKET CONNECTION
-  // ==================================================
-
-  io.on("connection", (socket) => {
     console.log(
-      `[${serverName}] Client connected: ${socket.id}`
+      `[${SERVER_NAME}] Team ${teamId} joined`
     );
-
-    // ------------------------------------------------
-    // JOIN TEAM
-    // ------------------------------------------------
-
-    socket.on("join-team", (teamId) => {
-      if (!teamId) return;
-
-      const roomName = `team-${teamId}`;
-
-      socket.join(roomName);
-
-      console.log(
-        `[${serverName}] Team ${teamId} joined`
-      );
-    });
-
-    // ------------------------------------------------
-    // ADMIN START GAME
-    // ------------------------------------------------
-
-    socket.on("admin-start-game", () => {
-      console.log(
-        `[${serverName}] ADMIN STARTED GAME`
-      );
-
-      io.emit("game-started", {
-        started: true,
-        server: serverName,
-        timestamp: new Date(),
-      });
-
-      console.log(
-        `[${serverName}] GAME START SIGNAL SENT`
-      );
-    });
-
-    // ------------------------------------------------
-    // ADMIN PAUSE GAME
-    // ------------------------------------------------
-
-    socket.on("admin-pause-game", () => {
-      console.log(
-        `[${serverName}] ADMIN PAUSED GAME`
-      );
-
-      io.emit("game-paused", {
-        paused: true,
-        server: serverName,
-        timestamp: new Date(),
-      });
-
-      console.log(
-        `[${serverName}] GAME PAUSE SIGNAL SENT`
-      );
-    });
-
-    // ------------------------------------------------
-    // ADMIN RESET GAME
-    // ------------------------------------------------
-
-    socket.on("admin-reset-game", () => {
-      console.log(
-        `[${serverName}] ADMIN RESET GAME`
-      );
-
-      io.emit("game-reset", {
-        reset: true,
-        server: serverName,
-        timestamp: new Date(),
-      });
-
-      console.log(
-        `[${serverName}] GAME RESET SIGNAL SENT`
-      );
-    });
-
-    // ------------------------------------------------
-    // ADMIN END GAME
-    // ------------------------------------------------
-
-    socket.on("admin-end-game", () => {
-      console.log(
-        `[${serverName}] ADMIN ENDED GAME`
-      );
-
-      io.emit("game-ended", {
-        ended: true,
-        server: serverName,
-        timestamp: new Date(),
-      });
-
-      console.log(
-        `[${serverName}] GAME END SIGNAL SENT`
-      );
-    });
-
-    // ------------------------------------------------
-    // TEAM UPDATE
-    // ------------------------------------------------
-
-    socket.on("team-update", (data) => {
-      if (!data) return;
-
-      io.emit("team-updated", data);
-
-      console.log(
-        `[${serverName}] TEAM UPDATE SENT`
-      );
-    });
-
-    // ------------------------------------------------
-    // ADMIN BROADCAST
-    // ------------------------------------------------
-
-    socket.on("admin-broadcast", (data) => {
-      if (!data) return;
-
-      io.emit("admin-message", data);
-    });
-
-    // ------------------------------------------------
-    // DISCONNECT
-    // ------------------------------------------------
-
-    socket.on("disconnect", () => {
-      console.log(
-        `[${serverName}] Client disconnected: ${socket.id}`
-      );
-    });
   });
 
-  // ==================================================
-  // 404
-  // ==================================================
+  // ADMIN START GAME
+  socket.on("admin-start-game", () => {
+    gameStatus = "RUNNING";
 
-  // TEST API
-  app.get("/test", (req, res) => {
-    res.json({
-      success: true,
-      message: "Coding Hunt API running",
-      server: serverName
+    io.emit("game-started", {
+      started: true,
+      status: gameStatus,
+      server: SERVER_NAME,
+      timestamp: new Date().toISOString(),
     });
+
+    io.emit("game-state", {
+      status: gameStatus,
+      server: SERVER_NAME,
+    });
+
+    console.log(`[${SERVER_NAME}] GAME STARTED`);
   });
 
-  app.use((req, res) => {
-    res.status(404).json({
-      success: false,
-      message: "API route not found",
-      server: serverName,
-      path: req.originalUrl,
+  // ADMIN PAUSE GAME
+  socket.on("admin-pause-game", () => {
+    if (gameStatus !== "RUNNING") return;
+
+    gameStatus = "PAUSED";
+
+    io.emit("game-paused", {
+      paused: true,
+      status: gameStatus,
+      server: SERVER_NAME,
+      timestamp: new Date().toISOString(),
     });
+
+    io.emit("game-state", {
+      status: gameStatus,
+      server: SERVER_NAME,
+    });
+
+    console.log(`[${SERVER_NAME}] GAME PAUSED`);
   });
 
-  // ==================================================
-  // ERROR HANDLER
-  // ==================================================
+  // ADMIN RESET GAME
+  socket.on("admin-reset-game", () => {
+    gameStatus = "READY";
 
-  app.use((err, req, res, next) => {
-    console.error(
-      `[${serverName}] SERVER ERROR:`,
-      err
-    );
-
-    res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-      server: serverName,
+    io.emit("game-reset", {
+      reset: true,
+      status: gameStatus,
+      server: SERVER_NAME,
+      timestamp: new Date().toISOString(),
     });
+
+    io.emit("game-state", {
+      status: gameStatus,
+      server: SERVER_NAME,
+    });
+
+    console.log(`[${SERVER_NAME}] GAME RESET`);
   });
 
-  // ==================================================
-  // START SERVER
-  // ==================================================
+  // ADMIN END GAME
+  socket.on("admin-end-game", () => {
+    gameStatus = "ENDED";
 
-  server.listen(port, () => {
-    console.log("");
-    console.log("========================================");
-    console.log(`       CODING HUNT ${serverName}`);
-    console.log("========================================");
-    console.log(`Server  : http://localhost:${port}`);
-    console.log(`Health  : http://localhost:${port}/health`);
+    io.emit("game-ended", {
+      ended: true,
+      status: gameStatus,
+      server: SERVER_NAME,
+      timestamp: new Date().toISOString(),
+    });
+
+    io.emit("game-state", {
+      status: gameStatus,
+      server: SERVER_NAME,
+    });
+
+    console.log(`[${SERVER_NAME}] GAME ENDED`);
+  });
+
+  // TEAM UPDATE
+  socket.on("team-update", (data) => {
+    if (!data) return;
+
+    io.emit("team-updated", data);
+  });
+
+  // ADMIN BROADCAST
+  socket.on("admin-broadcast", (data) => {
+    if (!data) return;
+
+    io.emit("admin-message", data);
+  });
+
+  // DISCONNECT
+  socket.on("disconnect", () => {
     console.log(
-      `Monitor : http://localhost:${port}/api/monitor/status`
+      `[${SERVER_NAME}] Client disconnected: ${socket.id}`
     );
-    console.log("Status  : ONLINE");
-    console.log("========================================");
-    console.log("");
   });
-
-  return server;
-};
-
-// ==================================================
-// DATABASE
-// ==================================================
-
-connectDB();
-
-// ==================================================
-// START ALL 4 SERVERS
-// ==================================================
-
-SERVER_CONFIG.forEach(({ name, port }) => {
-  createServer(name, port);
 });
+
+// ==================================================
+// 404 HANDLER
+// ==================================================
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: "API route not found",
+    server: SERVER_NAME,
+    path: req.originalUrl,
+  });
+});
+
+// ==================================================
+// ERROR HANDLER
+// ==================================================
+
+app.use((err, req, res, next) => {
+  console.error(`[${SERVER_NAME}] SERVER ERROR:`, err);
+
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  res.status(500).json({
+    success: false,
+    message: "Internal Server Error",
+    server: SERVER_NAME,
+  });
+});
+
+// ==================================================
+// CONNECT DATABASE AND START SERVER
+// ==================================================
+
+async function startServer() {
+  try {
+    await connectDB();
+
+    httpServer.listen(PORT, "0.0.0.0", () => {
+      console.log("========================================");
+      console.log(`CODING HUNT ${SERVER_NAME}`);
+      console.log(`Port: ${PORT}`);
+      console.log(`Health: /health`);
+      console.log(`Test: /test`);
+      console.log(`Monitor: /api/monitor/status`);
+      console.log("Status: ONLINE");
+      console.log("========================================");
+    });
+  } catch (error) {
+    console.error("Failed to start Coding Hunt:", error);
+    process.exit(1);
+  }
+}
+
+startServer();
