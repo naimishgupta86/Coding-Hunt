@@ -281,6 +281,15 @@ const createServer = (serverName, port) => {
   // 404
   // ==================================================
 
+  // TEST API
+  app.get("/test", (req, res) => {
+    res.json({
+      success: true,
+      message: "Coding Hunt API running",
+      server: serverName
+    });
+  });
+
   app.use((req, res) => {
     res.status(404).json({
       success: false,
