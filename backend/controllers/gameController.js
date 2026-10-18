@@ -183,16 +183,33 @@ export const submitAnswer = async (req, res) => {
     // FIND QUESTION
     // ==================================================
 
-    const question = await Question.findOne({
-      questionId,
-    });
+   // ==================================================
+// FIND QUESTION
+// ==================================================
 
-    if (!question) {
-      return res.status(404).json({
-        success: false,
-        message: "Question not found.",
-      });
-    }
+let question = null;
+
+// First try questionId field
+question = await Question.findOne({
+  questionId,
+});
+
+// If not found, try MongoDB _id
+if (!question) {
+  try {
+    question = await Question.findById(questionId);
+  } catch (error) {
+    // Invalid MongoDB ObjectId
+    question = null;
+  }
+}
+
+if (!question) {
+  return res.status(404).json({
+    success: false,
+    message: "Question not found.",
+  });
+}
 
     // ==================================================
     // SECURITY CHECK
@@ -905,6 +922,58 @@ export const reportViolation = async (
     return res.status(500).json({
       success: false,
       message: error.message,
+    });
+  }
+};
+export const testAnswerLoad = async (req, res) => {
+  try {
+    const { teamId, questionId, answer } = req.body;
+
+    if (!teamId || !questionId || answer === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "teamId, questionId and answer are required",
+      });
+    }
+
+    const question = await Question.findById(questionId).select(
+      "answer marks set round"
+    );
+
+    if (!question) {
+      return res.status(404).json({
+        success: false,
+        message: "Question not found",
+      });
+    }
+
+    const normalizedAnswer = String(answer).trim().toLowerCase();
+    const normalizedCorrect = String(question.answer).trim().toLowerCase();
+
+    const correct = normalizedAnswer === normalizedCorrect;
+
+    // IMPORTANT:
+    // No Team update
+    // No score change
+    // No lives change
+    // No ActivityLog
+    // No elimination
+
+    return res.json({
+      success: true,
+      testMode: true,
+      correct,
+      marks: correct ? question.marks : 0,
+      message: correct
+        ? "Test answer accepted"
+        : "Test answer incorrect",
+    });
+  } catch (error) {
+    console.error("Test Answer Load Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Test answer failed",
     });
   }
 };

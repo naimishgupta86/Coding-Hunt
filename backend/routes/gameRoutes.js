@@ -6,6 +6,7 @@ import {
   getClue,
   verifyHalfCode,
   reportViolation,
+  testAnswerLoad,
 } from "../controllers/gameController.js";
 
 const router = express.Router();
@@ -21,6 +22,8 @@ router.post(
   "/answer",
   submitAnswer
 );
+
+router.post("/test-answer", testAnswerLoad);
 
 // Get clue + location
 router.get(
